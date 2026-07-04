@@ -1,0 +1,168 @@
+{% if flash_messages %}
+    console.log("ANAN")
+    <div class="toast-container position-fixed bottom-0 end-0 p-3" style="z-index: 1055;">
+        {% for flash in flash_messages %}
+            {% set bg_class = 'bg-success text-white' if flash.category == 'success'
+                              else 'bg-danger text-white' if flash.category == 'error'
+                              else 'bg-warning text-dark' if flash.category == 'warning'
+                              else 'bg-info text-white' %}
+            {% set icon_class = 'check-circle-fill' if flash.category == 'success'
+                                else 'exclamation-triangle-fill' if flash.category == 'error'
+                                else 'exclamation-triangle-fill' if flash.category == 'warning'
+                                else 'info-circle-fill' %}
+
+            <div class="toast flash-toast {{ bg_class }}"
+                 role="alert"
+                 aria-live="assertive"
+                 aria-atomic="true"
+                 data-bs-autohide="true"
+                 data-bs-delay="5000"
+                 style="min-width: 300px; animation: slideInRight 0.5s ease-out;">
+                <div class="toast-header {{ bg_class }} border-0">
+                    <i class="bi bi-{{ icon_class }} me-2"></i>
+                    <strong class="me-auto">
+                        {% if flash.category == 'success' %}
+                            Success!
+                        {% elif flash.category == 'error' %}
+                            Error!
+                        {% elif flash.category == 'warning' %}
+                            Warning!
+                        {% else %}
+                            Information
+                        {% endif %}
+                    </strong>
+                    <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"
+                            {% if flash.category in ['success', 'error', 'info'] %}
+                            style="filter: invert(1) grayscale(100%) brightness(200%);"
+                            {% endif %}></button>
+                </div>
+                <div class="toast-body">
+                    {{ flash.message }}
+                </div>
+            </div>
+        {% endfor %}
+    </div>
+
+<style>
+    @keyframes slideInRight {
+        from {
+            transform: translateX(100%);
+            opacity: 0;
+        }
+        to {
+            transform: translateX(0);
+            opacity: 1;
+        }
+    }
+
+    .flash-toast {
+        border-radius: 0.5rem;
+        box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+        margin-bottom: 0.75rem;
+        transition: all 0.3s ease;
+    }
+
+    .flash-toast:hover {
+        transform: translateX(-5px);
+        box-shadow: 0 0.75rem 1.5rem rgba(0, 0, 0, 0.2);
+    }
+
+    .toast-container {
+        max-width: 350px;
+    }
+
+    /* Ensure toasts stack properly */
+    .toast-container .toast + .toast {
+        margin-top: 0.5rem;
+    }
+
+    /* Custom close button for better visibility on colored backgrounds */
+    .toast-header .btn-close {
+        font-size: 0.875rem;
+    }
+</style>
+
+<script>
+    function showFlashToast(message, category = 'info') {
+        const bgClass = {
+            success: 'bg-success text-white',
+            error: 'bg-danger text-white',
+            warning: 'bg-warning text-dark',
+            info: 'bg-info text-white'
+        }[category] || 'bg-info text-white';
+
+        const iconClass = {
+            success: 'check-circle-fill',
+            error: 'exclamation-triangle-fill',
+            warning: 'exclamation-triangle-fill',
+            info: 'info-circle-fill'
+        }[category] || 'info-circle-fill';
+
+        const title = {
+            success: 'Success!',
+            error: 'Error!',
+            warning: 'Warning!',
+            info: 'Information'
+        }[category] || 'Information';
+
+        const toast = document.createElement('div');
+        toast.className = `toast flash-toast ${bgClass}`;
+        toast.setAttribute('role', 'alert');
+        toast.setAttribute('aria-live', 'assertive');
+        toast.setAttribute('aria-atomic', 'true');
+        toast.setAttribute('data-bs-autohide', 'true');
+        toast.setAttribute('data-bs-delay', '5000');
+        toast.style.minWidth = '300px';
+        toast.style.animation = 'slideInRight 0.5s ease-out';
+
+        toast.innerHTML = `
+            <div class="toast-header ${bgClass} border-0">
+                <i class="bi bi-${iconClass} me-2"></i>
+                <strong class="me-auto">${title}</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"
+                    ${['success', 'error', 'info'].includes(category) ? 'style="filter: invert(1) grayscale(100%) brightness(200%);"' : ''}>
+                </button>
+            </div>
+            <div class="toast-body">
+                ${message}
+            </div>
+        `;
+
+        // Append to container
+        const container = document.querySelector('.toast-container');
+        if (container) {
+            container.appendChild(toast);
+            const toastInstance = new bootstrap.Toast(toast);
+            toastInstance.show();
+
+            // Clean up after dismiss
+            toast.addEventListener('hidden.bs.toast', () => toast.remove());
+        } else {
+            console.warn('No .toast-container found to show toast.');
+        }
+    }
+
+    // Auto-show all toasts when page loads
+    document.addEventListener('DOMContentLoaded', function() {
+        var toastElements = document.querySelectorAll('.flash-toast');
+        toastElements.forEach(function(toastElement, index) {
+            // Stagger the appearance of multiple toasts
+            setTimeout(function() {
+                var toast = new bootstrap.Toast(toastElement);
+                toast.show();
+            }, index * 200); // 200ms delay between each toast
+        });
+    });
+
+    // Auto-dismiss success messages after 5 seconds
+    document.addEventListener('DOMContentLoaded', function() {
+        const successAlerts = document.querySelectorAll('.alert-success');
+        successAlerts.forEach(alert => {
+            setTimeout(() => {
+                const bsAlert = new bootstrap.Alert(alert);
+                bsAlert.close();
+            }, 4000);
+        });
+    });
+</script>
+{% endif %}

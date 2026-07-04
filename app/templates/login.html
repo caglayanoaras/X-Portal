@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" type="image/png" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="{{ url_for('static', path='/css/style.css') }}">
+    <title>Sign In</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Gotham-Book', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        .video-background {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: -1;
+        }
+
+        .video-background video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .video-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(30, 60, 114, 0.3), rgba(42, 82, 152, 0.4));
+            z-index: 0;
+        }
+
+        .login-container {
+            position: absolute;
+            bottom: 80px;
+            right: 80px;
+            width: 380px;
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(20px);
+            border-radius: 20px;
+            padding: 40px;
+            box-shadow: 0 25px 45px rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            z-index: 10;
+            animation: slideInUp 1s ease-out;
+        }
+
+        @keyframes slideInUp {
+            from {
+                opacity: 0;
+                transform: translateY(50px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .login-header {
+            text-align: center;
+            margin-bottom: 35px;
+        }
+
+        .login-title {
+            color: #ffffff;
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+        }
+
+        .login-subtitle {
+            color: rgba(255, 255, 255, 0.8);
+            font-size: 14px;
+            font-weight: 400;
+        }
+
+        .form-group {
+            margin-bottom: 25px;
+            position: relative;
+        }
+
+        .form-label {
+            display: block;
+            color: rgba(255, 255, 255, 0.9);
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 8px;
+            text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 15px 20px;
+            border: 2px solid transparent;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+            font-size: 16px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+        }
+
+        .form-input::placeholder {
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--company-color1);
+            background: rgba(255, 255, 255, 0.2);
+            box-shadow: 0 0 20px rgba(74, 144, 226, 0.3);
+            transform: translateY(-2px);
+        }
+
+        .login-button {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--company-color1), var(--company-color2));
+            color: #ffffff;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .login-button::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
+            transition: left 0.5s;
+        }
+
+        .login-button:hover::before {
+            left: 100%;
+        }
+
+        .login-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 15px 35px rgba(74, 144, 226, 0.4);
+        }
+
+        .login-button:active {
+            transform: translateY(-1px);
+        }
+
+        .forgot-password {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .forgot-password a {
+            color: rgba(255, 255, 255, 0.8);
+            text-decoration: none;
+            font-size: 14px;
+            transition: color 0.3s ease;
+        }
+
+        .forgot-password a:hover {
+            color: var(--company-color1);
+        }
+
+        .loading {
+            opacity: 0.7;
+            pointer-events: none;
+        }
+
+        .loading .login-button {
+            background: linear-gradient(135deg, #6c757d, #6c757d);
+        }
+
+        @media (max-width: 768px) {
+            .login-container {
+                right: 20px;
+                bottom: 20px;
+                left: 20px;
+                width: auto;
+                padding: 30px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .login-container {
+                padding: 25px;
+            }
+            
+            .login-title {
+                font-size: 24px;
+            }
+        }
+    </style>
+</head>
+<body style="--company-color1: {{ company_color1 }}; --company-color2: {{ company_color2 }};">
+    <meta id="video-data" data-videos="{{ company_videos }}">
+
+    <div class="video-background">
+        <video autoplay muted loop id="backgroundVideo">
+            <source id="videoSource" src="" type="video/mp4">
+            Your browser does not support HTML5 video.
+        </video>
+    </div>
+    
+    <div class="video-overlay"></div>
+    
+    <div class="login-container">
+        <div class="login-header">
+            <h1 class="login-title">{{ company_name }} Portal</h1>
+            <p class="login-subtitle">Sign in to continue</p>
+        </div>
+        
+        <form id="loginForm" action="{{ url_for('login_for_access_token') }}" method="post">
+            <div class="form-group">
+                <label for="username" class="form-label">Username</label>
+                <input 
+                    type="text" 
+                    id="username" 
+                    name="username" 
+                    class="form-input" 
+                    placeholder="Enter your username"
+                    required
+                    autocomplete="username"
+                >
+            </div>
+            
+            <div class="form-group">
+                <label for="password" class="form-label">Password</label>
+                <input 
+                    type="password" 
+                    id="password" 
+                    name="password" 
+                    class="form-input" 
+                    placeholder="Enter your password"
+                    required
+                    autocomplete="current-password"
+                >
+            </div>
+            
+            <button type="submit" class="login-button">
+                Sign In
+            </button>
+        </form>
+    </div>
+
+    <script>
+        // Randomly select a background video on page load
+        const videoString = document.getElementById('video-data').dataset.videos;
+        const videos = videoString.split(',').map(s => s.trim());
+
+        const randomVideo = videos[Math.floor(Math.random() * videos.length)];
+        const videoSource = document.getElementById('videoSource');
+        const backgroundVideo = document.getElementById('backgroundVideo');
+        videoSource.src = randomVideo;
+        backgroundVideo.load();
+
+        const loginForm = document.getElementById('loginForm');
+        const loginContainer = document.querySelector('.login-container');
+
+        // Handle form submission
+        loginForm.addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            // Add loading state
+            loginContainer.classList.add('loading');
+            
+            // Get form data
+            const formData = new FormData(loginForm);
+            
+            try {
+                const response = await fetch("{{ url_for('login_for_access_token') }}", {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: new URLSearchParams(formData)
+                });
+                
+                if (response.ok) {
+                    const data = await response.json();
+                    console.log('Login successful:', data);
+                    window.location.href = "{{ url_for('dashboard') }}";
+                } else {
+                    const errorData = await response.json();
+                    console.error('Login failed:', errorData);
+                    alert('Login failed: ' + (errorData.detail || 'Invalid credentials'));
+                }
+            } catch (error) {
+                console.error('Network error:', error);
+                alert('Network error. Please try again.');
+            } finally {
+                loginContainer.classList.remove('loading');
+            }
+        });
+
+        // Video event handlers
+        backgroundVideo.addEventListener('loadstart', function() {
+            console.log('Video loading started');
+        });
+
+        backgroundVideo.addEventListener('canplay', function() {
+            console.log('Video can start playing');
+        });
+
+        backgroundVideo.addEventListener('ended', function() {
+            console.log('Video ended, restarting...');
+            this.currentTime = 0;
+            this.play();
+        });
+
+        backgroundVideo.addEventListener('error', function(e) {
+            console.error('Video error:', e);
+            document.querySelector('.video-background').style.background = 
+                'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        });
+
+        // Add some interactive effects
+        document.addEventListener('mousemove', function(e) {
+            const x = e.clientX / window.innerWidth;
+            const y = e.clientY / window.innerHeight;
+            
+            const overlay = document.querySelector('.video-overlay');
+            overlay.style.background = `linear-gradient(${135 + x * 30}deg, 
+                rgba(30, 60, 114, ${0.3 + y * 0.1}), 
+                rgba(42, 82, 152, ${0.4 + x * 0.1}))`;
+        });
+
+        // Input field animations
+        const inputs = document.querySelectorAll('.form-input');
+        inputs.forEach(input => {
+            input.addEventListener('focus', function() {
+                this.parentElement.style.transform = 'scale(1.02)';
+            });
+            
+            input.addEventListener('blur', function() {
+                this.parentElement.style.transform = 'scale(1)';
+            });
+        });
+    </script>
+</body>
+</html>

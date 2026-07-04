@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+{% set navbar_page_title = "User Profile" %}
+{% block title %}User Profile{% endblock %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card mt-4 shadow-sm">
+                <div class="card-body p-5">
+                    <!-- Profile Image and Info Section -->
+                    <div class="text-center mb-5">
+                        <div class="position-relative d-inline-block mb-4">
+                            <img src="/static/images/{{ user.profile_image_path }}" 
+                                 alt="Profile Image" 
+                                 class="rounded-circle shadow-sm" 
+                                 width="180" 
+                                 height="180"
+                                 style="object-fit: cover; border: 4px solid #f8f9fa;">
+                        </div>
+                        <h3 class="mb-2 text-dark fw-bold">{{ user.name }} {{ user.surname }} ({{ user.username }})</h3>
+                        <p class="text-muted fs-5 mb-0">{{ user.title }}</p>
+                    </div>
+                    
+                    <!-- Profile Update Form -->
+                    <div class="mb-5">
+
+                        <form method="post" action="/update_profile" enctype="multipart/form-data">
+                            <div class="mb-4">
+                                <label for="email" class="form-label fw-medium">Email Address</label>
+                                <input type="email" class="form-control form-control-lg" id="email" name="email" 
+                                       value="{{ user.email }}" required>
+                            </div>
+                            
+                            <div class="mb-4">
+                                <label for="profile_image" class="form-label fw-medium">Profile Image</label>
+                                <input class="form-control form-control-lg" type="file" id="profile_image" 
+                                       name="profile_image" accept="image/png, image/jpeg, image/gif">
+                                <div class="form-text">Upload a new profile picture (Max size: 5MB - JPEG, PNG, GIF)</div>
+                            </div>
+                            
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-custom-blue btn-lg">
+                                    <i class="bi bi-check-circle me-2"></i>Update Profile
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                    
+                    <!-- Password Update Form -->
+                    <div class="border-top pt-4">
+                        <h5 class="mb-4 text-dark fw-semibold">
+                            <i class="bi bi-shield-lock me-2"></i>Change Password
+                        </h5>
+                        <form method="post" action="/update_password">
+                            <div class="mb-3">
+                                <label for="current_password" class="form-label fw-medium">Current Password</label>
+                                <input type="password" class="form-control form-control-lg" id="current_password" 
+                                       name="current_password" required>
+                            </div>
+                            
+                            <div class="row mb-3">
+                                <div class="col-md-6">
+                                    <label for="new_password" class="form-label fw-medium">New Password</label>
+                                    <input type="password" class="form-control form-control-lg" id="new_password" 
+                                           name="new_password" required>
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="confirm_password" class="form-label fw-medium">Confirm New Password</label>
+                                    <input type="password" class="form-control form-control-lg" id="confirm_password" 
+                                           name="confirm_password" required>
+                                </div>
+                            </div>
+                            
+                            <div class="d-grid">
+                                <button type="submit" class="btn btn-outline-custom-red btn-lg">
+                                    <i class="bi bi-key me-2"></i>Change Password
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

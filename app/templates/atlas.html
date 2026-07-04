@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% set navbar_page_title = "Atlas" %}
+{% block title %}Atlas{% endblock %}
+
+{% block styles %}
+  <!-- Styles for users and permissions. Goes to the head of the html -->
+{% endblock %}
+
+{% block scripts %}
+<!-- Scripts for users and permissions. Goes to the bottom of the body of the html -->
+  <script src="{{ url_for('static', path='/js/ag-grid-enterprise.min.js') }}"></script>
+  <script type="module" src="{{ url_for('static', path='js/apps/users-and-permissions-app.js') }}"></script>
+{% endblock %}
+
+{% block content %}
+{% endblock %}

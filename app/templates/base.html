@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>{% block title %}-{% endblock %}</title>
+  <link rel="icon" type="image/png" href="/static/images/favicon.ico">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/bootstrap.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/all.min.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='/css/tom-select.bootstrap5.min.css') }}">
+  
+  <script defer src="{{ url_for('static', path='/js/bootstrap.bundle.min.js') }}"></script>
+  <script defer src="{{ url_for('static', path='/js/tom-select.complete.js') }}"></script>
+  
+  {% block styles %}{% endblock %}
+</head>
+<body>
+  <!-- Include shared navbar -->
+  {% include 'navbar.html' %}
+
+  <!-- jinja templates does not process js if you have type=module. Thus urls are provided in html template. -->
+  <div id="user-skills-url"
+    data-url-get-all="{{ url_for('get_all_user_skills') }}"
+    data-url-create="{{ url_for('create_new_user_skill') }}"
+    data-url-update="{{ url_for('update_existing_user_skill', skill_id='PLACEHOLDER') }}"
+    data-url-delete="{{ url_for('delete_user_skill_by_id', skill_id='PLACEHOLDER') }}">
+  </div>
+
+  <div id="user-roles-url"
+    data-url-get-all="{{ url_for('get_all_user_roles') }}"
+    data-url-create="{{ url_for('create_new_user_role') }}"
+    data-url-update="{{ url_for('update_existing_user_role', role_id='PLACEHOLDER') }}"
+    data-url-delete="{{ url_for('delete_user_role_by_id', role_id='PLACEHOLDER') }}">
+  </div>
+
+  <div id="existing-modules-url"
+    data-url-get-all="{{ url_for('get_all_modules') }}">
+  </div>
+
+  <div id="users-url"
+      data-url-get-all="{{ url_for('get_all_users') }}"
+      data-url-create="{{ url_for('create_new_user') }}"
+      data-url-update="{{ url_for('update_existing_user', username='PLACEHOLDER') }}"
+      data-url-delete="{{ url_for('delete_user_by_username', username='PLACEHOLDER') }}">
+  </div>
+  
+  <!-- Show Links Modal. This is actually a general modal for showing linked objects -->
+  <div class="modal fade" id="showLinksModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-scrollable modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Show Links Modal</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <ul id="linksList" class="list-group"></ul>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete-confirmation modal -->
+  <div class="modal fade" id="confirmDeleteModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Delete ?</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          Are you sure you want to delete this entity? This action cannot be undone.
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button id="confirmDeleteBtn" class="btn btn-danger">Delete</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="container-fluid">
+    {% block content %}{% endblock %}
+  </div>
+
+  <!-- Include Flash Messages -->
+  {% include 'flash_messages.html' %}
+
+  {% block scripts %}{% endblock %}
+</body>
+</html>

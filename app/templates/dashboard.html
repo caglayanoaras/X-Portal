@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% set navbar_page_title = "Dashboard" %}
+{% block title %}Dashboard{% endblock %}
+
+
+{% block content %}
+<div class="container mt-4">
+  <h2>Welcome, {{ user.name }} {{ user.surname }}!</h2>
+  <div class="row mt-4">
+    {% for module in user.modules %}
+    <div class="col-lg-3 col-md-4 col-sm-12 col-12 mb-4">
+      <div class="card shadow-sm h-100 d-flex flex-column" style="max-width: 320px; margin: 0 auto;">
+        <img src="{{ module.image_url }}" class="card-img-top" alt="{{ module.title }}" style="aspect-ratio: 1 / 1; width: 100%; object-fit: cover;">
+        
+        <div class="card-body d-flex flex-column flex-grow-1">
+          <h5 class="card-title">{{ module.title }}</h5>
+          <p class="card-text flex-grow-1">{{ module.description }}</p>
+          <a href="{{ url_for(module.linkname) }}" class="btn btn-custom-blue mt-auto">Go to {{ module.title }}</a>
+        </div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endblock %}
