@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% set navbar_page_title = "Data Panels" %}
+{% block title %}Data Panels{% endblock %}
+
+{% block styles %}
+<style>
+  /* Full-bleed iframe: cancel the container padding and fill the viewport
+     below the navbar. */
+  .container-fluid:has(> #data-panels-frame) { padding: 0; }
+  #data-panels-frame {
+    width: 100%;
+    height: calc(100vh - 56px);
+    border: 0;
+    display: block;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<iframe id="data-panels-frame" src="/data_panels/dash/" title="Veri Panoları"></iframe>
+{% endblock %}

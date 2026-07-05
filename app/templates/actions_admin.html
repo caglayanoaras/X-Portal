@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% set navbar_page_title = "Actions · Admin" %}
+{% block title %}Actions Admin{% endblock %}
+
+{% block content %}
+<div id="actions-admin-urls"
+     data-url-types-all="{{ url_for('get_all_action_types') }}"
+     data-url-type-create="{{ url_for('create_action_type') }}"
+     data-url-type-update="{{ url_for('update_action_type', type_id='PLACEHOLDER') }}"
+     data-url-type-delete="{{ url_for('delete_action_type', type_id='PLACEHOLDER') }}"
+     data-url-all-actions="{{ url_for('get_all_actions') }}"
+     data-url-admin-roles="{{ url_for('get_actions_admin_roles') }}">
+</div>
+
+<div class="p-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0"><i class="fas fa-gear text-secondary me-2"></i>Actions Admin</h3>
+    <a href="{{ url_for('actions_index') }}" class="btn btn-outline-secondary">
+      <i class="fas fa-arrow-left me-1"></i>Back to My Actions
+    </a>
+  </div>
+
+  <ul class="nav nav-tabs mb-3" role="tablist">
+    <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-types" type="button">Action Types</button></li>
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-all" type="button">All Actions</button></li>
+    {% if is_superadmin %}
+    <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-perms" type="button">Permissions</button></li>
+    {% endif %}
+  </ul>
+
+  <div class="tab-content">
+    <!-- Action Types -->
+    <div class="tab-pane fade show active" id="tab-types">
+      <div class="d-flex justify-content-end mb-2">
+        <button class="btn btn-primary" id="add-type-btn"><i class="fas fa-plus me-1"></i>New Action Type</button>
+      </div>
+      <div id="action-types-grid" style="height: 520px;"></div>
+    </div>
+
+    <!-- All Actions -->
+    <div class="tab-pane fade" id="tab-all">
+      <div class="d-flex align-items-center mb-2">
+        <label class="form-label mb-0 me-2">Filter by type:</label>
+        <select id="all-actions-type-filter" class="form-select" style="max-width: 320px;"></select>
+      </div>
+      <div id="all-actions-grid" style="height: 520px;"></div>
+    </div>
+
+    {% if is_superadmin %}
+    <!-- Permissions (superadmin only) -->
+    <div class="tab-pane fade" id="tab-perms">
+      <p class="text-muted">
+        Choose which roles can open this admin panel. Superadmins always have access.
+        A user with any selected role can use <strong>Action Types</strong> and <strong>All Actions</strong>,
+        but only superadmins see this <strong>Permissions</strong> tab. Create and assign roles in
+        <em>Users &amp; Permissions</em>.
+      </p>
+      <div id="perm-roles-list" class="mb-3" style="max-width: 480px;"></div>
+      <button class="btn btn-primary" id="perm-save-btn"><i class="fas fa-save me-1"></i>Save Permissions</button>
+      <span id="perm-save-status" class="ms-2 text-success fw-semibold"></span>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+<!-- Action Type modal (with schema builder) -->
+<div class="modal fade" id="type-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="type-modal-title">New Action Type</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <form id="type-form" autocomplete="off">
+          <div class="row">
+            <div class="col-md-6 mb-3">
+              <label class="form-label">Name <span class="text-danger">*</span></label>
+              <input class="form-control" id="type-name" required>
+            </div>
+            <div class="col-md-3 mb-3">
+              <label class="form-label">Expected (min)</label>
+              <input class="form-control" id="type-expected" type="number" min="0">
+            </div>
+            <div class="col-md-3 mb-3">
+              <div class="form-check form-switch mt-4">
+                <input class="form-check-input" type="checkbox" id="type-active" checked>
+                <label class="form-check-label" for="type-active">Active</label>
+              </div>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Description</label>
+            <textarea class="form-control" id="type-description" rows="2"></textarea>
+          </div>
+
+          <hr>
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Attributes</h6>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="add-field-btn">
+              <i class="fas fa-plus me-1"></i>Add Field
+            </button>
+          </div>
+          <div id="schema-builder"></div>
+
+          <div class="mb-3 mt-3">
+            <label class="form-label">Display field (row label in grids)</label>
+            <select class="form-select" id="type-display-field"><option value="">— none —</option></select>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="type-save-btn"><i class="fas fa-save me-1"></i>Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Delete / retire confirm -->
+<div class="modal fade" id="type-delete-modal" tabindex="-1">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Delete / Retire Action Type</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        If this type has recorded actions it will be <strong>retired</strong> (hidden from new actions) to
+        preserve history; otherwise it will be permanently deleted. Continue?
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-danger" id="type-delete-confirm">Delete / Retire</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/ag-grid-enterprise.min.js') }}"></script>
+<script type="module" src="{{ url_for('static', path='js/apps/actions-admin-app.js') }}"></script>
+{% endblock %}

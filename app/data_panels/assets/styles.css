@@ -1,0 +1,183 @@
+/* ===========================================================================
+   Veri Panoları — brand styles
+   Brand: Gotham + Reflex Blue / 485 Red / Cool Gray
+   ======================================================================== */
+
+/* ---- Fonts ---- */
+@font-face { font-family: "Gotham"; src: url("fonts/Gotham-Book.otf") format("opentype");
+  font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: "Gotham"; src: url("fonts/Gotham-Medium.otf") format("opentype");
+  font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: "Gotham"; src: url("fonts/Gotham-Bold.ttf") format("truetype");
+  font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: "Gotham"; src: url("fonts/Gotham-Black.ttf") format("truetype");
+  font-weight: 800; font-style: normal; font-display: swap; }
+@font-face { font-family: "Gotham Light"; src: url("fonts/Gotham-Light.otf") format("opentype");
+  font-weight: 300; font-style: normal; font-display: swap; }
+@font-face { font-family: "FA"; src: url("fonts/fa-solid-900.woff2") format("woff2");
+  font-weight: 900; font-style: normal; }
+
+:root {
+  --blue: #263685; --red: #DD140E; --gray: #4D4D4D;
+  --light: #F8F7F7; --gold: #D29F13; --navy: #1E1A34;
+  --ink: #222223; --muted: #6E7079; --hair: #E6E6EA; --white: #FFFFFF;
+  --shadow: 0 1px 3px rgba(30,26,52,.06), 0 6px 18px rgba(30,26,52,.05);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: "Gotham", Arial, sans-serif;
+  background: var(--light); color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.app { max-width: 1480px; margin: 0 auto; padding: 22px 26px 48px; }
+
+/* ---- Header ---- */
+.topbar {
+  display: flex; align-items: center; gap: 22px;
+  padding-bottom: 18px; border-bottom: 2px solid var(--hair); margin-bottom: 20px;
+}
+.topbar .logo { height: 52px; width: auto; }
+.topbar .titles { flex: 1; }
+.topbar h1 {
+  font-weight: 700; font-size: 24px; letter-spacing: .2px; margin: 0;
+  text-transform: uppercase; color: var(--ink);
+}
+.topbar .titles p { margin: 3px 0 0; color: var(--muted); font-size: 13.5px; }
+.topbar .status {
+  color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap;
+  align-self: flex-end;
+}
+
+/* ---- Controls ---- */
+.controls {
+  display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px 18px;
+  background: var(--white); border: 1px solid var(--hair); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 16px 18px; margin-bottom: 20px;
+}
+.ctrl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.ctrl-date { grid-column: span 2; }
+.ctrl-date .DateRangePicker,
+.ctrl-date .DateRangePickerInput { width: 100%; }
+.ctrl-date .DateRangePickerInput { display: flex; align-items: center;
+  border: 1px solid var(--hair); border-radius: 6px; }
+.ctrl-date .DateInput { width: auto; flex: 1; background: transparent; }
+.ctrl-date .DateInput_input { padding: 7px 8px; }
+.ctrl > label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .6px; color: var(--muted);
+}
+.ctrl .radio { display: flex; gap: 14px; align-items: center; font-size: 13px;
+  padding-top: 4px; }
+.ctrl .radio label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+.ctrl-btn {                       /* full-width bottom row: worknote left, button right */
+  grid-column: 1 / -1;
+  flex-direction: row-reverse;
+  align-items: center;
+  justify-content: space-between;
+}
+.worknote { font-size: 11px; color: var(--muted); }
+.ctrl-btn .worknote { margin-top: 0; }
+
+.btn {
+  font-family: inherit; font-weight: 700; font-size: 13px; cursor: pointer;
+  background: var(--blue); color: var(--white); border: none; border-radius: 8px;
+  padding: 9px 16px; transition: background .15s ease;
+}
+.btn:hover { background: #1d2a6b; }
+.btn .fa { font-family: "FA"; font-weight: 900; font-style: normal; }
+.btn .fa::before { content: "\f021"; } /* arrows-rotate */
+
+/* ---- KPI cards ---- */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px; margin-bottom: 18px; }
+.kpi {
+  background: var(--white); border: 1px solid var(--hair); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 16px 18px; position: relative; overflow: hidden;
+}
+.kpi::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--blue);
+}
+.kpi-val {
+  font-family: "Gotham Light", "Gotham", sans-serif; font-weight: 300;
+  font-size: 30px; line-height: 1.1; color: var(--ink); letter-spacing: -.5px;
+}
+.kpi-lbl {
+  margin-top: 6px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .6px; color: var(--muted);
+}
+/* accent overrides (default left bar is blue) */
+.kpi.acc-gold::before { background: var(--gold); }
+.kpi.acc-red::before { background: var(--red); }
+
+/* ---- Layout rows / cards ---- */
+.row { display: grid; gap: 16px; margin-bottom: 16px; }
+.row.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.card {
+  background: var(--white); border: 1px solid var(--hair); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 14px 16px 8px;
+}
+.card.full { grid-column: 1 / -1; }
+.card.span-2 { grid-column: span 2; }
+
+.card-head { display: flex; align-items: baseline; justify-content: space-between;
+  padding: 4px 2px 10px; }
+.card-head h3 { margin: 0; font-size: 15px; font-weight: 800; color: var(--ink); }
+.card-head .hint { font-size: 11.5px; color: var(--muted); }
+
+/* ---- Dropdown / DatePicker brand tweaks ---- */
+.Select-control, .Select-menu-outer { font-family: inherit !important; }
+.Select.is-focused .Select-control { border-color: var(--blue) !important; }
+.DateInput_input { font-family: inherit !important; font-size: 13px !important; }
+.CalendarDay__selected, .CalendarDay__selected:hover { background: var(--blue) !important;
+  border-color: var(--blue) !important; }
+.DateRangePickerInput { border-radius: 6px; }
+
+/* ---- Header back-link ---- */
+.backlink { display: inline-block; font-size: 12px; color: var(--blue);
+  text-decoration: none; font-weight: 700; margin-bottom: 6px; }
+.backlink:hover { text-decoration: underline; }
+
+/* ---- Landing page ---- */
+.home { max-width: 1080px; margin: 0 auto; padding: 22px 26px 48px; }
+.home-hero { text-align: center; padding: 30px 28px; margin-bottom: 26px; }
+.home-hero h2 {
+  margin: 0 0 18px; font-size: 18px; font-weight: 800; color: var(--ink);
+  text-transform: uppercase; letter-spacing: .5px;
+}
+.home-pick { display: flex; gap: 12px; justify-content: center; align-items: center;
+  max-width: 580px; margin: 0 auto; }
+.home-pick-sel { flex: 1; text-align: left; }
+.home-pick .btn { padding: 9px 22px; }
+
+.home-cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px;
+}
+.dash-card {
+  display: flex; gap: 18px; align-items: center; text-decoration: none; color: inherit;
+  background: var(--white); border: 1px solid var(--hair); border-radius: 10px;
+  box-shadow: var(--shadow); padding: 18px 20px;
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+.dash-card:hover { transform: translateY(-2px); border-color: #cdd2ea;
+  box-shadow: 0 8px 24px rgba(30,26,52,.12); }
+.dash-card-emblem { height: 44px; width: auto; flex: 0 0 auto; }
+.dash-card h3 { margin: 0 0 4px; font-size: 16px; font-weight: 800; color: var(--ink); }
+.dash-card p { margin: 0 0 9px; font-size: 13px; color: var(--muted); line-height: 1.4; }
+.dash-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11px;
+  font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--blue); }
+.dash-meta span::before { content: "• "; color: var(--hair); }
+.dash-meta span:first-child::before { content: ""; }
+
+/* ---- Placeholder (not-yet-designed dashboards) ---- */
+.card.placeholder { display: flex; flex-direction: column; align-items: center;
+  justify-content: center; text-align: center; padding: 70px 24px; gap: 8px; }
+.placeholder .ph-emblem { height: 60px; width: auto; opacity: .28; margin-bottom: 8px; }
+.placeholder h2 { margin: 0; font-size: 20px; font-weight: 800; color: var(--ink); }
+.placeholder p { margin: 0; color: var(--muted); font-size: 14px; }
+
+/* ---- Footer ---- */
+.foot { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--hair);
+  color: var(--muted); font-size: 12px; text-align: center; }

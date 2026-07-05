@@ -164,9 +164,13 @@ def update_user(*, db: Session, db_user: User, user_update: UserUpdate, updated_
         if db.exec(select(User).where(User.username == user_update.username)).first():
             raise DuplicateResourceError("Username already exists")
 
-    data = user_update.model_dump(exclude_unset=True, exclude={"roles", "modules", "skills"})
+    data = user_update.model_dump(exclude_unset=True, exclude={"roles", "modules", "skills", "pw"})
     data["last_modified_by"] = updated_by
     db_user.sqlmodel_update(data)
+
+    # Optional password change: an empty/omitted pw keeps the current password.
+    if user_update.pw:
+        db_user.hashed_pw = get_password_hash(user_update.pw)
 
     if user_update.roles is not None:
         db_user.roles = _resolve_m2m_ids(db, UserRole, user_update.roles, "Roles")

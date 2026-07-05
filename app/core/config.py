@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     COMPANY_NAME: str = "X"
     COMPANY_COLOR1: str = "#21358b"
     COMPANY_COLOR2: str = "#d7140e"
+
+    # Data Panels (embedded Dash dashboards)
+    APP_TITLE: str = "Veri Panoları"          # dashboards' landing header / tab title
+    DATA1_PATH: str = "dummy_data1.xlsx"       # relative paths resolve under app/static/data
+    DATA2_PATH: str = "dummy_data2.xlsx"
+    DATA3_PATH: str = "dummy_data3.xlsx"
     COMPANY_VIDEOS: str = (
         "/static/images/video1.mp4, "
         "/static/images/video3.mp4, "

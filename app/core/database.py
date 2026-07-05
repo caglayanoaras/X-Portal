@@ -1,10 +1,22 @@
-from sqlmodel import SQLModel, create_engine, Session, select, text
+from sqlmodel import SQLModel, create_engine, Session, select
+from sqlalchemy import event
 from sqlalchemy.exc import IntegrityError
 
 from app.core.config import settings
 from app.models import *
 
 engine = create_engine(settings.DATABASE_URL, echo=False)
+
+
+# SQLite disables foreign-key enforcement per connection by default, so
+# `ondelete="CASCADE"` on our link tables is ignored unless we turn it on for
+# every connection the engine hands out.
+if engine.dialect.name == "sqlite":
+    @event.listens_for(engine, "connect")
+    def _enable_sqlite_foreign_keys(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
 
 # Dependency for FastAPI routes
 def get_session():
@@ -24,20 +36,34 @@ for each module we might have a crud function module under app\\crud directory.
 """
 def init_db():
     SQLModel.metadata.create_all(engine)
-    with engine.connect() as connection:
-        connection.execute(text("PRAGMA foreign_keys=ON"))  # for SQLite only
     initial_modules = [
         {
+            "key": "users_and_permissions",
             "title": "Users & Permissions",
             "description": "Management of user credentials",
             "linkname": "users_and_permissions_index",
             "image_url": "/static/images/users_and_permissions.png"
         },
         {
+            "key": "atlas",
             "title": "The Atlas",
             "description": "Centralized management of laboratory data, records, and reference tables.",
             "linkname": "atlas_index",
             "image_url": "/static/images/atlas.png"
+        },
+        {
+            "key": "actions",
+            "title": "Actions",
+            "description": "Trigger, assign, and track operational actions across the platform.",
+            "linkname": "actions_index",
+            "image_url": "/static/images/actions.png"
+        },
+        {
+            "key": "data_panels",
+            "title": "Data Panels",
+            "description": "Configurable data panels and dashboards for at-a-glance insights.",
+            "linkname": "data_panels_index",
+            "image_url": "/static/images/data_panels.png"
         },
 
     ]

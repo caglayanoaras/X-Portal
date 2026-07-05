@@ -15,8 +15,9 @@ from typing import Annotated
 from pwdlib import PasswordHash
 
 from app.core.config import settings
-from app.models import User, UserRead, UserType
+from app.models import User, UserRead, UserType, ModuleKey, Module, ModuleAdminRoleLink
 from app.core.database import get_session
+from app.core.exceptions import ModuleAccessDenied
 
 auth_router = APIRouter(
     prefix="/auth",
@@ -126,6 +127,84 @@ async def get_current_superadmin(
             detail="The user doesn't have the required permissions.",
         )
     return current_user
+
+
+def require_module(module_key: ModuleKey, superadmin_only: bool = False):
+    """
+    Dependency factory that gates an entire module router. Attach it once per
+    module at `include_router(...)` time.
+
+    - Superadmins always pass (they implicitly own every module).
+    - If `superadmin_only=True`, non-superadmins are ALWAYS denied, even if the
+      module happens to be assigned to them (e.g. Users & Permissions). Module
+      assignment is never sufficient for these — superadmin is mandatory.
+    - Otherwise a non-superadmin must have the module in their `User.modules` set.
+    - On denial it raises `ModuleAccessDenied`, which the app's exception
+      handler turns into a friendly redirect (HTML) or a 403 (API/JSON).
+    """
+    async def _dependency(
+        current_user: Annotated[User, Depends(get_current_active_user)],
+    ) -> User:
+        if current_user.usertype == UserType.superadmin:
+            return current_user
+        if superadmin_only or not any(m.key == module_key.value for m in current_user.modules):
+            raise ModuleAccessDenied(module_key.value)
+        return current_user
+
+    return _dependency
+
+
+def require_role(rolename: str):
+    """
+    Dependency factory for intra-module (endpoint-level) authorization: the
+    'endpoint -> role' layer. Superadmins always pass; everyone else must hold
+    a role with the given name. Reusable across modules (e.g. 'action_admins').
+    """
+    async def _dependency(
+        current_user: Annotated[User, Depends(get_current_active_user)],
+    ) -> User:
+        if current_user.usertype == UserType.superadmin:
+            return current_user
+        if any(getattr(r, "rolename", None) == rolename for r in current_user.roles):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"This action requires the '{rolename}' role.",
+        )
+
+    return _dependency
+
+
+def is_module_admin(db: Session, user: User, module_key: ModuleKey) -> bool:
+    """True if the user may use a module's admin area: a superadmin, or the
+    holder of any role a superadmin designated as an admin role for that module.
+    The set of admin roles is data (managed per module), never hard-coded."""
+    if user.usertype == UserType.superadmin:
+        return True
+    module = db.exec(select(Module).where(Module.key == module_key.value)).first()
+    if not module:
+        return False
+    admin_role_ids = set(db.exec(
+        select(ModuleAdminRoleLink.role_id).where(ModuleAdminRoleLink.module_id == module.id)
+    ).all())
+    return any(r.id in admin_role_ids for r in user.roles)
+
+
+def require_module_admin(module_key: ModuleKey):
+    """Dependency: gate a module's admin endpoints/page behind admin access
+    (superadmin or a designated admin role). Superadmins never get locked out."""
+    async def _dependency(
+        current_user: Annotated[User, Depends(get_current_active_user)],
+        db: SessionDep,
+    ) -> User:
+        if is_module_admin(db, current_user, module_key):
+            return current_user
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have admin access to this module.",
+        )
+
+    return _dependency
 
 @auth_router.post("/token", name="login_for_access_token", response_model=Token)
 async def login_for_access_token(

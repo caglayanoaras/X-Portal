@@ -132,7 +132,7 @@ def update_existing_user_skill(current_user: UserDep, skill_id: int, skill_updat
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User skill not found")
         
     try:
-        return update_skill(db=db, db_role=db_skill, input_skill=skill_update)
+        return update_skill(db=db, db_skill=db_skill, input_skill=skill_update)
     except DuplicateResourceError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 

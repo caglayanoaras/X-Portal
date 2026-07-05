@@ -2,19 +2,20 @@ import os
 import uuid
 from typing import Annotated
 
-from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form, status
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
 from sqlmodel import Session, select
 from fastapi_standalone_docs import StandaloneDocs
 
-from app.models import UserRead, User
+from app.models import UserRead, User, ModuleKey
 from app.core.database import init_db, get_session
+from app.core.exceptions import ModuleAccessDenied
 from app.dependencies.auth import (
     auth_router, get_current_active_user,
-    verify_password, get_password_hash
+    verify_password, get_password_hash, require_module
 )
 from app.core.config import settings
 from app.core.utils import (
@@ -23,6 +24,9 @@ from app.core.utils import (
 )
 from app.api.users_and_permissions import users_and_permissions_router
 from app.api.atlas import atlas_router
+from app.api.actions import actions_router
+from app.api.data_panels import data_panels_router
+from app.data_panels.mount import guarded_dash_app, DASH_MOUNT_PATH
 
 
 # region Type Aliases (Dependencies)
@@ -52,10 +56,46 @@ app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 app.mount("/static", StaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
-# Include Routers
+# Mount the embedded Dash data panels (Data Panels module). The mount is guarded
+# by the portal session + data_panels module (see app/data_panels/mount.py).
+app.mount(DASH_MOUNT_PATH, guarded_dash_app)
+
+# Include Routers.
+# auth_router stays open (login/logout must work when logged out). Every other
+# module router is gated by its ModuleKey: a user must be assigned the module
+# (superadmins bypass). This is the single, readable access-policy map.
 app.include_router(auth_router)
-app.include_router(users_and_permissions_router)
-app.include_router(atlas_router)
+app.include_router(
+    users_and_permissions_router,
+    # Superadmin-only, regardless of assignment: even if a non-superadmin somehow
+    # has this module, the gate still refuses. Assignment is never sufficient here.
+    dependencies=[Depends(require_module(ModuleKey.users_and_permissions, superadmin_only=True))],
+)
+app.include_router(
+    atlas_router,
+    dependencies=[Depends(require_module(ModuleKey.atlas))],
+)
+app.include_router(
+    actions_router,
+    dependencies=[Depends(require_module(ModuleKey.actions))],
+)
+app.include_router(
+    data_panels_router,
+    dependencies=[Depends(require_module(ModuleKey.data_panels))],
+)
+
+
+@app.exception_handler(ModuleAccessDenied)
+async def module_access_denied_handler(request: Request, exc: ModuleAccessDenied):
+    """
+    A browser navigating to a forbidden module page gets a friendly redirect
+    back to the dashboard with a flash; API/fetch clients get a JSON 403.
+    Docs are unaffected — they live outside the gated module routers.
+    """
+    if "text/html" in request.headers.get("accept", ""):
+        flash(request, "You don't have access to that module.", "error")
+        return redirect_to_route(request, "dashboard")
+    return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": exc.detail})
 
 
 # region Pages
@@ -82,8 +122,12 @@ async def dashboard(request: Request, current_user: ActiveUserDep):
     """
     return templates.TemplateResponse(
         request=request,
-        name="dashboard.html", 
-        context={"user": current_user}
+        name="dashboard.html",
+        context={
+            "user": current_user,
+            "company_color1": settings.COMPANY_COLOR1,
+            "company_color2": settings.COMPANY_COLOR2,
+        }
     )
 
 
