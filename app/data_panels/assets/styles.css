@@ -14,8 +14,6 @@
   font-weight: 800; font-style: normal; font-display: swap; }
 @font-face { font-family: "Gotham Light"; src: url("fonts/Gotham-Light.otf") format("opentype");
   font-weight: 300; font-style: normal; font-display: swap; }
-@font-face { font-family: "FA"; src: url("fonts/fa-solid-900.woff2") format("woff2");
-  font-weight: 900; font-style: normal; }
 
 :root {
   --blue: #263685; --red: #DD140E; --gray: #4D4D4D;
@@ -72,14 +70,15 @@ body {
 .ctrl .radio { display: flex; gap: 14px; align-items: center; font-size: 13px;
   padding-top: 4px; }
 .ctrl .radio label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
-.ctrl-btn {                       /* full-width bottom row: worknote left, button right */
+.ctrl-btn {                       /* full-width bottom row: worknote left, button (if any) right */
   grid-column: 1 / -1;
-  flex-direction: row-reverse;
+  flex-direction: row;
   align-items: center;
   justify-content: space-between;
 }
 .worknote { font-size: 11px; color: var(--muted); }
 .ctrl-btn .worknote { margin-top: 0; }
+.ctrl-btn .btn { margin-left: auto; }   /* stays right even without a worknote */
 
 .btn {
   font-family: inherit; font-weight: 700; font-size: 13px; cursor: pointer;
@@ -87,8 +86,6 @@ body {
   padding: 9px 16px; transition: background .15s ease;
 }
 .btn:hover { background: #1d2a6b; }
-.btn .fa { font-family: "FA"; font-weight: 900; font-style: normal; }
-.btn .fa::before { content: "\f021"; } /* arrows-rotate */
 
 /* ---- KPI cards ---- */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -178,6 +175,156 @@ body {
 .placeholder h2 { margin: 0; font-size: 20px; font-weight: 800; color: var(--ink); }
 .placeholder p { margin: 0; color: var(--muted); font-size: 14px; }
 
+/* ---- Tables: the whole header cell sorts ---- */
+/* DataTable only wires the small sort icon; its ::after stretches that click
+   target over the full header cell, so clicking the column name sorts too. */
+.dash-spreadsheet th.dash-header { position: relative; cursor: pointer; }
+.dash-spreadsheet th.dash-header .column-header--sort::after {
+  content: ""; position: absolute; inset: 0;
+}
+.dash-spreadsheet th.dash-header:hover .column-header-name { color: var(--blue); }
+/* Filter cells are always case-insensitive; hide DataTable's "Aa" toggle. */
+.dash-spreadsheet .dash-filter--case { display: none; }
+
 /* ---- Footer ---- */
 .foot { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--hair);
   color: var(--muted); font-size: 12px; text-align: center; }
+
+/* ===========================================================================
+   Panel 4 — Ortak Malzemeler (project cards, overlap answer, search)
+   --share-all mirrors theme.SHARE_ALL.
+   ======================================================================== */
+:root { --blue-faint: #D8DBEC; --share-all: #364BA7; }
+
+/* ---- Hover explanations: any element with data-tip="…" ---- */
+[data-tip] { position: relative; cursor: help; }
+[data-tip]:hover { z-index: 40; }
+[data-tip]:hover::after {
+  content: attr(data-tip);
+  position: absolute; left: 0; top: calc(100% + 8px); z-index: 40;
+  width: max-content; max-width: 280px; padding: 8px 11px; border-radius: 6px;
+  background: var(--navy); color: var(--white); box-shadow: 0 8px 24px rgba(30,26,52,.25);
+  font-family: "Gotham", Arial, sans-serif; font-size: 12px; font-weight: 400;
+  line-height: 1.45; letter-spacing: 0; text-transform: none; text-align: left;
+  white-space: normal; pointer-events: none;
+}
+[data-tip].tip-up:hover::after { top: auto; bottom: calc(100% + 8px); }
+[data-tip].tip-end:hover::after { left: auto; right: 0; }
+
+/* KPI tiles clip their overflow (for the accent bar), so the tooltip lives on a wrapper. */
+.kpi-wrap { display: flex; }
+.kpi-wrap > .kpi { flex: 1; }
+
+.ctrl-wide { grid-column: span 3; }
+.search {
+  width: 100%; font-family: inherit; font-size: 13px; color: var(--ink);
+  padding: 8px 12px; border: 1px solid var(--hair); border-radius: 6px;
+  background: var(--white); outline: none;
+}
+.search:focus { border-color: var(--blue); }
+.btn.ghost { background: var(--white); color: var(--blue); box-shadow: inset 0 0 0 1px #cdd2ea; }
+.btn.ghost:hover { background: var(--light); }
+
+.section-label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+  color: var(--muted); margin: 0 2px 10px;
+}
+
+/* ---- Project cards ---- */
+.pcards {                        /* auto-fit: the cards fill the row, no empty slot at the end */
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 12px; margin-bottom: 18px;
+}
+.pcard {                         /* no overflow clip: the number tooltips extend past it */
+  display: flex; flex-direction: column;
+  background: var(--white); border: 1px solid var(--hair); border-radius: 10px;
+  box-shadow: var(--shadow);
+  transition: transform .12s ease, box-shadow .12s ease, border-color .12s ease;
+}
+.pcard:hover { position: relative; z-index: 5; transform: translateY(-2px);
+  border-color: #cdd2ea; box-shadow: 0 8px 24px rgba(30,26,52,.12); }
+.pcard.focus { border-color: var(--blue); box-shadow: 0 0 0 2px var(--blue), var(--shadow); }
+.pcard.compare { border-color: var(--gold); box-shadow: 0 0 0 2px var(--gold), var(--shadow); }
+.pcard-main {
+  display: block; width: 100%; padding: 0; border: none; background: none;
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+}
+.pcard-main:focus-visible, .pcard-cmp:focus-visible, .ovl-seg:focus-visible {
+  outline: 2px solid var(--blue); outline-offset: -2px; }
+.pcard-photo {
+  position: relative; display: block; aspect-ratio: 4 / 3; border-radius: 9px 9px 0 0;
+  background-color: var(--navy); background-size: cover; background-position: center;
+}
+.pcard-photo::after {            /* light scrim: keeps the name legible, lets the photo show */
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  background: linear-gradient(180deg, rgba(30,26,52,0) 55%, rgba(30,26,52,.7) 100%);
+}
+.pcard-name {
+  position: absolute; left: 11px; right: 8px; bottom: 8px; z-index: 1;
+  color: var(--white); font-weight: 800; font-size: 16px; letter-spacing: .3px;
+  text-shadow: 0 1px 3px rgba(0,0,0,.45);
+}
+.pcard-badge {
+  position: absolute; left: 8px; top: 8px; z-index: 1;
+  font-size: 9.5px; font-weight: 800; letter-spacing: .6px;
+  padding: 3px 7px; border-radius: 4px; background: var(--blue); color: var(--white);
+}
+.pcard.compare .pcard-badge { background: var(--gold); color: var(--ink); }
+.pcard-body { display: block; padding: 10px 12px 10px; }
+.pcard-count { display: block; font-size: 12px; color: var(--muted); }
+.pcard-count b {
+  font-family: "Gotham Light", "Gotham", sans-serif; font-weight: 300;
+  font-size: 24px; color: var(--ink); margin-right: 3px;
+}
+.meter { display: block; height: 6px; border-radius: 3px; background: var(--blue-faint);
+  margin: 8px 0 6px; overflow: hidden; }
+.meter-fill { display: block; height: 100%; border-radius: 3px; background: var(--share-all); }
+.pcard-note { display: block; font-size: 11px; line-height: 1.35; color: var(--muted); }
+.pcard-note b { color: var(--ink); }
+.pcard-cmp {
+  margin-top: auto; padding: 8px 12px; border: none; border-top: 1px solid var(--hair);
+  border-radius: 0 0 9px 9px; background: none; font-family: inherit; font-size: 11px;
+  font-weight: 700; color: var(--blue); text-align: left; cursor: pointer;
+}
+.pcard-cmp:hover { background: var(--light); }
+.pcard-cmp.remove { color: var(--muted); }
+.pcard-cmp:disabled { color: var(--muted); cursor: default; background: none; }
+.pcard.focus .pcard-cmp { visibility: hidden; }
+
+/* ---- Answer card: sentence + overlap bar ---- */
+.card.answer { padding: 18px 22px 16px; }
+.answer-text { margin: 0 0 14px; font-size: 17px; line-height: 1.55; color: var(--ink); }
+.answer-text b { font-weight: 800; }
+.ovl-bar { display: flex; gap: 2px; height: 22px; }
+.ovl-seg {
+  flex-basis: 0; min-width: 6px; border: none; padding: 0; cursor: pointer;
+  font-family: inherit; font-size: 12px; font-weight: 700; color: var(--white);
+}
+.ovl-seg.ink { color: var(--ink); }
+.ovl-seg:first-child { border-radius: 4px 0 0 4px; }
+.ovl-seg:last-child { border-radius: 0 4px 4px 0; }
+.ovl-seg:only-child { border-radius: 4px; }
+.ovl-seg:hover { filter: brightness(1.08); }
+.ovl-legend { display: flex; flex-wrap: wrap; gap: 6px 22px; margin-top: 10px;
+  font-size: 12.5px; color: var(--muted); }
+.ovl-key { display: inline-flex; align-items: center; gap: 7px; }
+.ovl-key i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; }
+.ovl-key b { color: var(--ink); }
+.filters-note { margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+
+.kpi-sub { margin-top: 3px; font-size: 11.5px; color: var(--muted); }
+
+/* ---- Panel 4 cards shrink with the page: charts re-fit, the wide table scrolls inside ---- */
+.d4 .row > .card { min-width: 0; }
+
+/* ---- Table scope pills ---- */
+.scope { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 2px 12px; }
+.scope label {
+  display: inline-flex; align-items: center; cursor: pointer;
+  font-size: 12px; font-weight: 700; color: var(--muted);
+  border: 1px solid var(--hair); border-radius: 999px; padding: 5px 12px;
+}
+.scope input { position: absolute; opacity: 0; width: 0; height: 0; }
+.scope label:has(input:checked) { background: var(--blue); border-color: var(--blue);
+  color: var(--white); }
+.scope label:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }

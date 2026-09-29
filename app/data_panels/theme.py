@@ -39,6 +39,15 @@ EVENT_COLORS = {
 # Sequential-ish categorical palette (used sparingly).
 CATEGORICAL = [BLUE, GOLD, NAVY, BLUE_SOFT, GRAY, RED]
 
+# Dashboard 4 (Ortak Malzemeler): how widely a focus-project item is shared with
+# the compared projects. An ordinal ramp on the brand-blue hue, validated on the
+# white card surface (monotone lightness, light end 2.3:1). GOLD marks compared
+# projects (cards, table columns); NEUTRAL is context outside the focus project.
+SHARE_ALL = "#364BA7"         # used in all compared projects
+SHARE_SOME = "#7A8FD0"        # in some of them
+SHARE_NONE = "#96A9E1"        # in none of them
+NEUTRAL = "#9D9EA6"
+
 
 def _template() -> go.layout.Template:
     t = go.layout.Template()

@@ -27,4 +27,10 @@ DASHBOARDS = [
         "desc": "Yardım masası taleplerinin kapanma hacmi ve süreleri",
         "cadence": "Aylık güncellenir",
     },
+    {
+        "path": "/panel4",
+        "title": "Ortak Malzemeler",
+        "desc": "Projelerde kullanılan standart parçalar ve projeler arası ortaklık",
+        "cadence": "Aylık güncellenir",
+    },
 ]

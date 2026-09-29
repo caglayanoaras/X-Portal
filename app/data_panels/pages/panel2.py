@@ -320,8 +320,6 @@ def serve_layout():
                              options=_opts(df["islem"])),
             ]),
             html.Div(className="ctrl ctrl-btn", children=[
-                html.Button([html.I(className="fa"), " Yenile"],
-                            id="d2-reload", n_clicks=0, className="btn"),
                 html.Div(worknote, className="worknote"),
             ]),
         ]),
@@ -375,6 +373,7 @@ def serve_layout():
                         {"if": {"column_id": "key"}, "textAlign": "left",
                          "fontWeight": "600"}],
                 ),
+                dcc.Store(id=TABLE_SORT),
             ]),
         ]),
 
@@ -384,6 +383,7 @@ def serve_layout():
 
 
 layout = serve_layout
+TABLE_SORT = C.two_way_sort("d2-detail-table")  # header clicks: ascending <-> descending
 
 
 # --------------------------------------------------------------------------- #
@@ -424,10 +424,9 @@ layout = serve_layout
     Input("d2-f-bolum", "value"),
     Input("d2-f-personel", "value"),
     Input("d2-f-islem", "value"),
-    Input("d2-reload", "n_clicks"),
 )
 def update(unit_key, breakdown, basis, d0, d1, projes, types, revs,
-           bolums, personeller, islemler, _n):
+           bolums, personeller, islemler):
     df = get_data()
     unit = UNITS[unit_key]
     dim_label = BREAKDOWNS[breakdown]
@@ -459,20 +458,20 @@ def update(unit_key, breakdown, basis, d0, d1, projes, types, revs,
     for _, r in agg.iterrows():
         rows.append({
             "key": r["key"], "count": int(r["count"]),
-            "share": f"{r['count'] / total * 100:.1f}%",
-            "min": _fmt(r["min"], dec), "median": _fmt(r["median"], dec),
-            "mean": _fmt(r["mean"], dec), "p90": _fmt(r["p90"], dec),
-            "max": _fmt(r["max"], dec),
+            "share": C.num(r["count"] / total * 100, 1),
+            "min": C.num(r["min"], dec), "median": C.num(r["median"], dec),
+            "mean": C.num(r["mean"], dec), "p90": C.num(r["p90"], dec),
+            "max": C.num(r["max"], dec),
         })
     columns = [
         {"name": dim_label, "id": "key"},
-        {"name": "NCR", "id": "count"},
-        {"name": "Pay", "id": "share"},
-        {"name": f"Min ({suf})", "id": "min"},
-        {"name": f"Medyan ({suf})", "id": "median"},
-        {"name": f"Ortalama ({suf})", "id": "mean"},
-        {"name": f"P90 ({suf})", "id": "p90"},
-        {"name": f"Max ({suf})", "id": "max"},
+        C.num_col("NCR", "count"),
+        C.num_col("Pay", "share", 1, "%"),
+        C.num_col(f"Min ({suf})", "min", dec),
+        C.num_col(f"Medyan ({suf})", "median", dec),
+        C.num_col(f"Ortalama ({suf})", "mean", dec),
+        C.num_col(f"P90 ({suf})", "p90", dec),
+        C.num_col(f"Max ({suf})", "max", dec),
     ]
     table_title = f"Detay — {dim_label} bazında ({unit['label']})"
 

@@ -7,7 +7,7 @@ and how long do requests wait on them. Self-contained — owns its data schema,
 figures, layout and callback. Shared engine/atoms come from `common` / `theme`.
 
 Data: data/dummy_data1.xlsx (override with env DATA1_PATH). Reloaded automatically
-when the file's mtime changes (Yenile button forces a tick).
+when the file's mtime changes.
 """
 from __future__ import annotations
 
@@ -319,8 +319,6 @@ def serve_layout():
                              options=_event_opts(df["event_type"])),
             ]),
             html.Div(className="ctrl ctrl-btn", children=[
-                html.Button([html.I(className="fa"), " Yenile"],
-                            id="reload", n_clicks=0, className="btn"),
                 html.Div(worknote, className="worknote"),
             ]),
         ]),
@@ -370,6 +368,7 @@ def serve_layout():
                         {"if": {"column_id": "key"}, "textAlign": "left",
                          "fontWeight": "600"}],
                 ),
+                dcc.Store(id=TABLE_SORT),
             ]),
         ]),
 
@@ -379,6 +378,7 @@ def serve_layout():
 
 
 layout = serve_layout  # callable -> data refreshes on each navigation
+TABLE_SORT = C.two_way_sort("detail-table")  # header clicks: ascending <-> descending
 
 
 # --------------------------------------------------------------------------- #
@@ -414,9 +414,8 @@ layout = serve_layout  # callable -> data refreshes on each navigation
     Input("f-bolum", "value"),
     Input("f-kaynak", "value"),
     Input("f-event", "value"),
-    Input("reload", "n_clicks"),
 )
-def update(unit_key, breakdown, basis, d0, d1, projes, bolums, kaynaks, events, _n):
+def update(unit_key, breakdown, basis, d0, d1, projes, bolums, kaynaks, events):
     df = get_data()
     unit = UNITS[unit_key]
     dim_label = BREAKDOWNS[breakdown]
@@ -447,22 +446,22 @@ def update(unit_key, breakdown, basis, d0, d1, projes, bolums, kaynaks, events, 
     for _, r in agg.iterrows():
         rows.append({
             "key": r["key"], "count": int(r["count"]),
-            "share": f"{r['count'] / total * 100:.1f}%",
-            "min": _fmt(r["min"], dec),
-            "median": _fmt(r["median"], dec), "mean": _fmt(r["mean"], dec),
-            "p90": _fmt(r["p90"], dec), "max": _fmt(r["max"], dec),
-            "reject": f"{_fmt(r['reject_pct'], 1)}%",
+            "share": C.num(r["count"] / total * 100, 1),
+            "min": C.num(r["min"], dec),
+            "median": C.num(r["median"], dec), "mean": C.num(r["mean"], dec),
+            "p90": C.num(r["p90"], dec), "max": C.num(r["max"], dec),
+            "reject": C.num(r["reject_pct"], 1),
         })
     columns = [
         {"name": dim_label, "id": "key"},
-        {"name": "Talep", "id": "count"},
-        {"name": "Pay", "id": "share"},
-        {"name": f"Min ({suf})", "id": "min"},
-        {"name": f"Medyan ({suf})", "id": "median"},
-        {"name": f"Ortalama ({suf})", "id": "mean"},
-        {"name": f"P90 ({suf})", "id": "p90"},
-        {"name": f"Max ({suf})", "id": "max"},
-        {"name": "Ret %", "id": "reject"},
+        C.num_col("Talep", "count"),
+        C.num_col("Pay", "share", 1, "%"),
+        C.num_col(f"Min ({suf})", "min", dec),
+        C.num_col(f"Medyan ({suf})", "median", dec),
+        C.num_col(f"Ortalama ({suf})", "mean", dec),
+        C.num_col(f"P90 ({suf})", "p90", dec),
+        C.num_col(f"Max ({suf})", "max", dec),
+        C.num_col("Ret %", "reject", 1, "%"),
     ]
     table_title = f"Detay — {dim_label} bazında ({unit['label']})"
 

@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     DATA1_PATH: str = "dummy_data1.xlsx"       # relative paths resolve under app/static/data
     DATA2_PATH: str = "dummy_data2.xlsx"
     DATA3_PATH: str = "dummy_data3.xlsx"
+    DATA4_PATH: str = "dummy_data4.xlsx"
     COMPANY_VIDEOS: str = (
         "/static/images/video1.mp4, "
         "/static/images/video3.mp4, "

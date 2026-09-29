@@ -14,7 +14,9 @@ from datetime import datetime, time
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
-from dash import dcc, html, get_asset_url, get_relative_path
+from dash import (Input, Output, State, clientside_callback, dcc, html,
+                  get_asset_url, get_relative_path)
+from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
 import theme as T
 from app.core.config import settings
@@ -137,6 +139,58 @@ def fmt(v, dec: int = 1) -> str:
     if v is None or pd.isna(v):
         return "–"
     return f"{v:,.{dec}f}".replace(",", " ")
+
+
+# Turkish UI strings for dcc.Dropdown (Dash's defaults are English).
+DROPDOWN_LABELS = {
+    "select_all": "Tümünü seç", "deselect_all": "Seçimi kaldır",
+    "selected_count": "{num_selected} seçili", "search": "Ara",
+    "clear_search": "Aramayı temizle", "clear_selection": "Seçimi temizle",
+    "no_options_found": "Sonuç bulunamadı",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Tables
+# --------------------------------------------------------------------------- #
+def num(v, dec: int = 0):
+    """Cell value for a numeric column: rounded (clean xlsx export); NaN -> empty."""
+    return None if v is None or pd.isna(v) else round(float(v), dec)
+
+
+def num_col(name: str, col_id: str, dec: int = 0, suffix: str = "") -> dict:
+    """A DataTable column that sorts as a number but displays like `fmt()`
+    (space as thousands separator, "–" when empty)."""
+    fmt = Format(precision=dec, scheme=Scheme.fixed, group=Group.yes, groups=[3],
+                 group_delimiter=" ", decimal_delimiter=".", nully="–")
+    if suffix:
+        fmt = fmt.symbol(Symbol.yes).symbol_suffix(suffix)
+    return {"name": name, "id": col_id, "type": "numeric", "format": fmt}
+
+
+# DataTable's native sort cycles ascending -> descending -> unsorted; skipping
+# "unsorted" makes every header click flip small->large / large->small.
+_TWO_WAY_SORT = """
+function (sortBy, previous) {
+    if ((!sortBy || !sortBy.length) && previous && previous.length === 1
+            && previous[0].direction === 'desc') {
+        const flipped = [{column_id: previous[0].column_id, direction: 'asc'}];
+        return [flipped, flipped];
+    }
+    return [window.dash_clientside.no_update, sortBy];
+}
+"""
+
+
+def two_way_sort(table_id: str) -> str:
+    """Make header clicks on `table_id` toggle ascending/descending. Call once
+    at import; returns the id of the dcc.Store to put next to the table."""
+    store_id = f"{table_id}-sort"
+    clientside_callback(_TWO_WAY_SORT,
+                        Output(table_id, "sort_by"), Output(store_id, "data"),
+                        Input(table_id, "sort_by"), State(store_id, "data"),
+                        prevent_initial_call=True)
+    return store_id
 
 
 # --------------------------------------------------------------------------- #
