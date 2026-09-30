@@ -3,18 +3,20 @@
 Dashboard 4 — Ortak Malzemeler.
 
 For the GM: how many standard parts / materials does a project use, and how many
-of them are shared with other projects (e.g. MMU vs HÜRJET, or MMU vs HÜRJET,
-GÖKBEY and TLUH together)? Every row of the export is one item ("kalem"); every
+of them are shared with other projects (e.g. project A vs B, or A vs B, C and D
+together)? Every row of the export is one item ("kalem"); every
 yes/no column is a project. Project columns are detected from the data, so a new
-project in the export needs no code change. One focus project is compared with
-one or more projects; the focus project's items are bucketed by how many of the
-compared projects also use them, and the combinations chart shows every exact
-project combination. Self-contained like dashboards 1-3; shared atoms come from
-`common` / `theme`.
+project in the export needs no code change. One focus project can be compared
+with one or more projects; the focus project's items are then bucketed by how many
+of the compared projects also use them, and the combinations chart shows every
+exact project combination. With nothing to compare, the page shows the focus
+project on its own: no buckets, combinations or matrix, only how many projects
+its items (and all items) are used in. Self-contained like dashboards 1-3; shared
+atoms come from `common` / `theme`.
 
 Data: data/dummy_data4.xlsx (env DATA4_PATH). Header on row 1 -> skiprows=0.
 Photos: drop `assets/projects/<slug>.jpg|jpeg|png|webp`, where slug is the
-lower-case ASCII project code (GÖKBEY -> gokbey.jpg, HURKUS-2 -> hurkus-2.jpg).
+lower-case ASCII project code (ÖRNEK -> ornek.jpg, PROJE-2 -> proje-2.jpg).
 Projects without a photo show assets/projects/_placeholder.svg.
 Component IDs are prefixed "d4-".
 """
@@ -22,7 +24,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections import Counter, namedtuple
+from collections import namedtuple
 
 import numpy as np
 import pandas as pd
@@ -60,13 +62,12 @@ COLUMN_LABELS = {"tip": "Tip", "brans": "Branş", "alt_brans": "Alt branş",
 # every other project column is shown as-is.
 PROJECT_LABELS = {"HURJET": "HÜRJET", "HURKUS-2": "HÜRKUŞ-2", "IHA": "İHA"}
 DEFAULT_FOCUS = "MMU"
-DEFAULT_COMPARE = "HURJET"
 
 BREAKDOWNS = {k: COLUMN_LABELS[k] for k in ("brans", "alt_brans", "tip", "spec", "uretici")}
 DEFAULT_BREAKDOWN = "brans"
 TOP_GROUPS = 12          # bars in the breakdown chart
-TOP_COMBOS = 12          # bars in the combinations chart
-TOP_WORDS = 12           # bars in the keyword chart
+TOP_COMBOS = 16          # bars in the combinations chart
+HOVER_COMBOS = 10        # combinations listed when hovering a "kaç projede" bar
 TABLE_WIDTHS = {"tip": 120, "brans": 110, "alt_brans": 170,   # min px per text column
                 "spec": 125, "uretici": 150, "tanim": 280}
 
@@ -96,7 +97,6 @@ SYNONYMS = {
     "levha": ("sheet",),
     "plaka": ("plate",),
 }
-STOPWORDS = {"OR", "AND", "WITH", "FOR", "OF", "THE", "TO", "IN", "VE", "ILE"}
 
 PHOTO_DIR = os.path.join(C.ROOT, "assets", "projects")
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
@@ -125,7 +125,7 @@ def _label(code) -> str:
 
 
 def _names(codes) -> str:
-    """'HÜRJET' · 'HÜRJET ve GÖKBEY' · 'HÜRJET, GÖKBEY ve TLUH'."""
+    """'A' · 'A ve B' · 'A, B ve C'."""
     labels = [_label(c) for c in codes]
     return labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " ve " + labels[-1]
 
@@ -224,21 +224,22 @@ def _filter(items, tips, branslar, alt_branslar, ureticiler, query):
 
 
 def _pick(projects, focus, compare):
-    """A valid focus project and a non-empty list of other projects to compare with."""
+    """A valid focus project and the other projects to compare it with (maybe none)."""
     if focus not in projects:
         focus = DEFAULT_FOCUS if DEFAULT_FOCUS in projects else projects[0]
     if isinstance(compare, str):
         compare = [compare]
     compare = [p for p in dict.fromkeys(compare or []) if p in projects and p != focus]
-    if not compare:
-        compare = [next(p for p in (DEFAULT_FOCUS, DEFAULT_COMPARE, *projects)
-                        if p in projects and p != focus)]
     return focus, compare
 
 
 def _masks(dff, focus, compare):
-    """Row masks: focus items bucketed by how many compared projects also use them."""
+    """Row masks: focus items bucketed by how many compared projects also use them
+    (no buckets without a comparison), plus the ones no other project uses."""
     f = dff[focus]
+    unique = f & dff["n_proj"].eq(1)            # in no other project at all
+    if not compare:
+        return {"focus": f, "unique": unique}
     k = dff[compare].sum(axis=1)
     n = len(compare)
     return {
@@ -246,7 +247,7 @@ def _masks(dff, focus, compare):
         "hepsi": f & k.eq(n),
         "bazi": f & k.gt(0) & k.lt(n),
         "hic": f & k.eq(0),
-        "unique": f & dff["n_proj"].eq(1),       # in no other project at all
+        "unique": unique,
     }
 
 
@@ -254,7 +255,8 @@ def _bucket_labels(compare) -> dict:
     if len(compare) == 1:
         cl = _label(compare[0])
         return {"hepsi": f"{cl} ile ortak", "hic": f"{cl} projesinde yok"}
-    return {"hepsi": "Hepsinde ortak", "bazi": "Bazılarında var", "hic": "Hiçbirinde yok"}
+    return {"hepsi": "Hepsinde ortak", "bazi": "Bazılarında var",
+            "hic": f"{_names(compare)} projelerinde yok"}
 
 
 def _bucket_tips(focus, compare) -> dict:
@@ -294,16 +296,22 @@ def _photo(code) -> str:
     return get_asset_url("projects/_placeholder.svg")
 
 
-def _words(text):
-    """Keywords of a designation: 'SHEET METALLIC-T6-7075' -> SHEET, METALLIC, T6, 7075;
-    alloy codes such as A-286 stay whole."""
-    for token in re.findall(r"[0-9A-Za-zÇĞİÖŞÜçğıöşü][0-9A-Za-zÇĞİÖŞÜçğıöşü\-.]*", text):
-        token = token.strip("-.").upper()
-        parts = [token] if re.fullmatch(r"[A-Z]{1,2}-\d+", token) else token.split("-")
-        for w in parts:
-            w = w.strip(".")
-            if len(w) >= 2 and w not in STOPWORDS:
-                yield w
+def _combo_counts(dff, projects) -> pd.Series:
+    """Items per exact combination of `projects` as {bit code: count} (bit i =
+    projects[i]), largest first; items in none of them are left out."""
+    flags = dff[projects].to_numpy(dtype=bool)
+    codes = flags.astype(np.int64) @ (1 << np.arange(len(projects)))
+    return pd.Series(codes).value_counts().drop(0, errors="ignore")
+
+
+def _combo_lines(counts, projects, k) -> str:
+    """Hover lines for the combinations of exactly k projects, largest first."""
+    rows = [(n, " + ".join(_label(p) for i, p in enumerate(projects) if code >> i & 1))
+            for code, n in counts.items() if bin(code).count("1") == k]
+    lines = [f"{name}: <b>{_n(n)}</b>" for n, name in rows[:HOVER_COMBOS]]
+    if len(rows) > HOVER_COMBOS:
+        lines.append(f"… ve {len(rows) - HOVER_COMBOS} kombinasyon daha")
+    return "<br>".join(lines)
 
 
 def _int_axis(max_value) -> dict:
@@ -327,12 +335,9 @@ def _title(text, sub=None) -> dict:
 def fig_combos(dff, focus, compare, height):
     """UpSet-style chart: items per exact combination of the selected projects."""
     sel = [focus, *compare]
-    flags = dff[sel].to_numpy(dtype=bool)
-    flags = flags[flags.any(axis=1)]
-    if not len(flags):
+    counts = _combo_counts(dff, sel)            # bit i = sel[i]
+    if counts.empty:
         return _empty_fig("Seçilen projelerde filtreye uyan kalem yok")
-    codes = flags.astype(np.int64) @ (1 << np.arange(len(sel)))     # bit i = sel[i]
-    counts = pd.Series(codes).value_counts()
     full = (1 << len(sel)) - 1
 
     def rank(code):
@@ -366,11 +371,6 @@ def fig_combos(dff, focus, compare, height):
     fi = shown.index(full)
     fig.add_annotation(x=fi, y=values[fi], text=f"<b>{_n(values[fi])}</b>", yshift=11,
                        showarrow=False, font=dict(size=12, color=T.INK), row=1, col=1)
-    for j, mem in enumerate(members):           # connector through the member dots
-        if len(mem) > 1:
-            fig.add_scatter(x=[j, j], y=[sel[mem[0]], sel[mem[-1]]], mode="lines",
-                            line=dict(color=T.INK, width=2), hoverinfo="skip",
-                            showlegend=False, row=2, col=1)
     fig.add_scatter(
         x=[j for j in xs for _ in sel], y=[p for _ in xs for p in sel], mode="markers",
         marker=dict(size=11, color=[T.INK if c >> i & 1 else T.HAIRLINE
@@ -395,35 +395,38 @@ def fig_combos(dff, focus, compare, height):
 def fig_breakdown(dff, dim, focus, compare, height):
     fl = _label(focus)
     m = _masks(dff, focus, compare)
-    names = _bucket_labels(compare)
-    keys = [k for k, *_ in BUCKETS if k in names]
+    if compare:
+        names = _bucket_labels(compare)
+        series = [(k, color, names[k]) for k, color, _ in BUCKETS if k in names]
+    else:                                       # no comparison: one plain bar per group
+        series = [("focus", T.SHARE_ALL, f"{fl} kalemleri")]
+    keys = [k for k, *_ in series]
     parts = pd.DataFrame({"key": dff[dim], **{k: m[k] for k in keys}})[m["focus"]]
     if parts.empty:
         return _empty_fig(f"{fl} projesinde filtreye uyan kalem yok")
     g = parts.groupby("key")[keys].sum()
     g["total"] = g.sum(axis=1)
-    g = g.sort_values(["total", "hepsi"], ascending=False)
+    g = g.sort_values(["total", keys[0]], ascending=False)
     shown = g.head(TOP_GROUPS).iloc[::-1]       # largest bar on top
     plot_h = height - 100 - 44                  # figure minus top/bottom margins
     bar_w = min(0.62, 22 * len(shown) / max(plot_h, 1))   # bars stay <= ~22px thick
 
     fig = go.Figure()
-    for key, color, _ in BUCKETS:
-        if key not in names:
-            continue
+    for key, color, name in series:
         fig.add_bar(
-            y=shown.index, x=shown[key], name=names[key], orientation="h", width=bar_w,
+            y=shown.index, x=shown[key], name=name, orientation="h", width=bar_w,
             marker=dict(color=color, line=dict(color=T.WHITE, width=2)),
-            text=shown[key] if key == "hepsi" else None,
+            text=shown[key] if key == keys[0] else None,
             textposition="inside", insidetextanchor="middle", textangle=0,
             textfont=dict(color=T.WHITE, size=12),
-            hovertemplate="<b>%{x}</b> kalem · " + names[key] + "<br>%{y}<extra></extra>")
-    sub = f"Karşılaştırılan: {_names(compare)}"
+            hovertemplate="<b>%{x}</b> kalem · " + name + "<br>%{y}<extra></extra>")
+    notes = [f"Karşılaştırılan: {_names(compare)}"] if compare else []
     if len(g) > TOP_GROUPS:
-        sub += f" · en çok kalem içeren ilk {TOP_GROUPS} grup"
+        notes.append(f"en çok kalem içeren ilk {TOP_GROUPS} grup")
+    sub = " · ".join(notes)
     fig.update_layout(
-        title=_title(f"{BREAKDOWNS[dim]} bazında {fl} kalemleri", sub),
-        barmode="stack", barcornerradius=4,
+        title=_title(f"{BREAKDOWNS[dim]} bazında {fl} kalemleri", sub[:1].upper() + sub[1:]),
+        showlegend=bool(compare), barmode="stack", barcornerradius=4,
         # legend on its own line under the subtitle, so a long subtitle never runs into it
         legend=dict(traceorder="normal", x=0, xanchor="left", y=1.0, yanchor="bottom"),
         xaxis=dict(title="Kalem sayısı", showgrid=True, gridcolor=T.HAIRLINE, ticks="",
@@ -434,22 +437,33 @@ def fig_breakdown(dff, dim, focus, compare, height):
     return T.style_fig(fig, height=height)
 
 
-def fig_sharing(dff, focus, n_projects, height):
-    fl = _label(focus)
-    shared = dff.loc[dff[focus], "n_proj"]
-    if shared.empty:
-        return _empty_fig(f"{fl} projesinde filtreye uyan kalem yok")
-    counts = shared.value_counts().reindex(range(1, n_projects + 1), fill_value=0)
+def fig_sharing(dff, projects, height, focus=None):
+    """Items by the number of projects that use them: the focus project's items, or
+    every item when focus is None. Hovering a bar lists its exact project
+    combinations, which add up to the bar."""
+    fl = _label(focus) if focus else None
+    counts = _combo_counts(dff[dff[focus]] if focus else dff, projects)
+    if counts.empty:
+        return _empty_fig(f"{fl} projesinde filtreye uyan kalem yok" if focus
+                          else "Filtreye uyan kalem yok")
+    size = pd.Series([bin(c).count("1") for c in counts.index], index=counts.index)
+    per_k = counts.groupby(size).sum().reindex(range(1, len(projects) + 1), fill_value=0)
+    hover = [f"<b>{_n(v)}</b> kalem · {k} projede kullanılıyor"
+             + (f"<br><br>{_combo_lines(counts, projects, k)}" if v else "")
+             for k, v in per_k.items()]
     fig = go.Figure(go.Bar(
-        x=[str(k) for k in counts.index], y=counts.values,
+        x=[str(k) for k in per_k.index], y=per_k.values, hovertext=hover,
         marker=dict(color=T.SHARE_ALL, line=dict(width=0)),
-        hovertemplate="<b>%{y}</b> kalem<br>%{x} projede kullanılıyor<extra></extra>"))
+        hovertemplate="%{hovertext}<extra></extra>"))
+    if focus:
+        title = _title(f"{fl} kalemleri kaç projede kullanılıyor?", f"1 = yalnız {fl} projesinde")
+    else:
+        title = _title("Kalemler kaç projede kullanılıyor?",
+                       "Tüm projelerin kalemleri · 1 = yalnız bir projede")
     fig.update_layout(
-        title=_title(f"{fl} kalemleri kaç projede kullanılıyor?",
-                     f"1 = yalnız {fl} projesinde"),
-        bargap=0.45, barcornerradius=4, showlegend=False,
+        title=title, bargap=0.45, barcornerradius=4, showlegend=False,
         xaxis=dict(title="Kullanıldığı proje sayısı", type="category"),
-        yaxis=dict(title="Kalem sayısı", **_int_axis(counts.max())),
+        yaxis=dict(title="Kalem sayısı", **_int_axis(per_k.max())),
         separators=". ", margin=dict(l=10, r=16, t=76, b=44))
     return T.style_fig(fig, height=height)
 
@@ -498,28 +512,6 @@ def fig_matrix(dff, projects, focus, compare, height):
     return T.style_fig(fig, height=height)
 
 
-def fig_words(dff, height):
-    counts = Counter()
-    for text in dff.loc[dff["tanim"] != C.EMPTY_LABEL, "tanim"]:
-        counts.update(set(_words(text)))
-    top = counts.most_common(TOP_WORDS)
-    if not top:
-        return _empty_fig("Tanım bulunamadı")
-    words, values = zip(*top[::-1])            # most frequent on top
-    fig = go.Figure(go.Bar(
-        x=values, y=words, orientation="h",
-        marker=dict(color=T.SHARE_ALL, line=dict(width=0)),
-        hovertemplate="<b>%{x}</b> kalem<br>%{y}<extra></extra>"))
-    fig.update_layout(
-        title=_title("Tanımda sık geçen kelimeler", "Tıklanan kelime aramaya eklenir"),
-        bargap=0.4, barcornerradius=4, showlegend=False,
-        xaxis=dict(title="Kalem sayısı", showgrid=True, gridcolor=T.HAIRLINE, ticks="",
-                   **_int_axis(max(values))),
-        yaxis=dict(type="category", showgrid=False, ticks=""),
-        separators=". ", margin=dict(l=10, r=16, t=76, b=44))
-    return T.style_fig(fig, height=height)
-
-
 # --------------------------------------------------------------------------- #
 # HTML blocks (project cards, answer, KPIs, table)
 # --------------------------------------------------------------------------- #
@@ -536,6 +528,8 @@ def _project_cards(dff, projects, focus, compare):
             "pcard-count tip-up" + edge))
         if p == focus:
             note = [html.Span("Odak proje", className="pcard-note")]
+        elif not compare:                       # no comparison: each project's own count only
+            note = []
         else:
             both = int((f & dff[p]).sum())
             share = both / nf * 100 if nf else 0
@@ -552,12 +546,11 @@ def _project_cards(dff, projects, focus, compare):
         if badge:
             photo.insert(0, html.Span(badge, className="pcard-badge"))
         if role == "compare":
-            button, cls, off = (("Çıkar", "pcard-cmp remove", False) if len(compare) > 1
-                                else ("Karşılaştırılıyor", "pcard-cmp", True))
+            button, cls, off = "Çıkar", "pcard-cmp remove", False
         else:
             button, cls, off = "+ Karşılaştır", "pcard-cmp", role == "focus"
 
-        # Pattern IDs use the ASCII slug: Dash can't map a non-ASCII id (GÖKBEY)
+        # Pattern IDs use the ASCII slug: Dash can't map a non-ASCII id (e.g. ÖRNEK)
         # back to its value in ctx.triggered, so clicks on it would be lost.
         cards.append(html.Div(className=f"pcard {role}".strip(), children=[
             html.Button(id={"type": "d4-card", "index": _slug(p)}, n_clicks=0,
@@ -573,7 +566,13 @@ def _project_cards(dff, projects, focus, compare):
 
 
 def _answer(dff, focus, compare, note):
-    fl, names, many = _label(focus), _names(compare), len(compare) > 1
+    fl = _label(focus)
+    if not compare:                             # no comparison: the focus project alone
+        nf = int(dff[focus].sum())
+        text = ([html.B(fl), " projesinde ", html.B(_n(nf)), " kalem kullanılıyor."] if nf
+                else [html.B(fl), " projesinde filtreye uyan kalem yok."])
+        return [html.P(text, className="answer-text"), html.Div(note, className="filters-note")]
+    names, many = _names(compare), len(compare) > 1
     n = {k: int(v.sum()) for k, v in _masks(dff, focus, compare).items()}
     in_any = n["hepsi"] + n["bazi"]
     if n["focus"] == 0:
@@ -628,15 +627,33 @@ def _kpi(value, label, sub, tip, cls=""):
 
 
 def _kpis(dff, focus, compare, n_projects):
-    fl, names = _label(focus), _names(compare)
+    fl = _label(focus)
     in_focus = dff[dff[focus]]
     unique = int(in_focus["n_proj"].eq(1).sum())
     avg = C.fmt(in_focus["n_proj"].mean(), 1) if len(in_focus) else "–"
-    in_compare = int(dff[compare].any(axis=1).sum())
     specs = in_focus.loc[in_focus["spec"] != C.EMPTY_LABEL, "spec"].nunique()   # blanks aren't a spec
     avg_tip = (f"{fl} kalemlerinin ortalama kaç projede kullanıldığı ({fl} dahil)."
                + (f" {avg}, bir {fl} kaleminin ortalamada {avg} projede kullanıldığı "
                   f"anlamına gelir; sayı büyüdükçe ortaklık artar." if len(in_focus) else ""))
+    kpis = [
+        _kpi(_n(len(in_focus)), f"{fl} projesinde",
+             f"kalem · {_n(specs)} spesifikasyon",
+             f"Filtrelere uyan ve {fl} projesinde kullanılan kalem sayısı. Alt satırdaki "
+             f"sayı, bu kalemlerin kaç farklı spesifikasyona ait olduğunu gösterir."),
+        _kpi(_n(unique) + (f" ({_pct(unique, len(in_focus))})" if len(in_focus) else ""),
+             f"Yalnız {fl} projesinde", "başka hiçbir projede yok",
+             f"{fl} projesinde kullanılan ama başka hiçbir projede kullanılmayan kalem "
+             f"sayısı; yani yalnız {fl} projesine özgü kalemler. Parantezdeki yüzde, bu "
+             f"sayının {fl} kalemleri içindeki payıdır."),
+        _kpi(avg, "Ortalama paylaşım", f"proje / {fl} kalemi", avg_tip),
+        _kpi(_n(len(dff)), "Toplam kalem", f"filtreye uyan · {n_projects} proje",
+             f"Filtrelere uyan tüm kalemlerin sayısı; hangi projede kullanıldığına "
+             f"bakılmaksızın. Dosyada {n_projects} proje sütunu var.", "tip-end"),
+    ]
+    if not compare:
+        return kpis
+    names = _names(compare)
+    in_compare = int(dff[compare].any(axis=1).sum())
     if len(compare) == 1:
         cmp_kpi = _kpi(_n(in_compare), f"{names} projesinde", "kalem · karşılaştırılan",
                        f"Karşılaştırılan {names} projesinde kullanılan, filtrelere uyan "
@@ -646,28 +663,17 @@ def _kpis(dff, focus, compare, n_projects):
                        f"en az birinde · {len(compare)} proje",
                        f"{names} projelerinden en az birinde kullanılan, filtrelere uyan "
                        f"kalem sayısı.")
-    return [
-        _kpi(_n(len(in_focus)), f"{fl} projesinde",
-             f"kalem · {_n(specs)} spesifikasyon",
-             f"Filtrelere uyan ve {fl} projesinde kullanılan kalem sayısı. Alt satırdaki "
-             f"sayı, bu kalemlerin kaç farklı spesifikasyona ait olduğunu gösterir."),
-        _kpi(_n(unique), f"Yalnız {fl} projesinde", "başka hiçbir projede yok",
-             f"{fl} projesinde kullanılan ama başka hiçbir projede kullanılmayan kalem "
-             f"sayısı; yani yalnız {fl} projesine özgü kalemler."),
-        _kpi(avg, "Ortalama paylaşım", f"proje / {fl} kalemi", avg_tip),
-        cmp_kpi,
-        _kpi(_n(len(dff)), "Toplam kalem", f"filtreye uyan · {n_projects} proje",
-             f"Filtrelere uyan tüm kalemlerin sayısı; hangi projede kullanıldığına "
-             f"bakılmaksızın. Dosyada {n_projects} proje sütunu var.", "tip-end"),
-    ]
+    return kpis[:3] + [cmp_kpi] + kpis[3:]      # the compared projects before the total
 
 
 def _scope_options(focus, compare):
-    fl, labels = _label(focus), _bucket_labels(compare)
-    return ([{"label": "Tümü", "value": "all"},
-             {"label": f"{fl} projesinde", "value": "focus"}]
-            + [{"label": labels[k], "value": k} for k, *_ in BUCKETS if k in labels]
-            + [{"label": f"Yalnız {fl} projesinde", "value": "unique"}])
+    fl = _label(focus)
+    options = [{"label": "Tümü", "value": "all"},
+               {"label": f"{fl} projesinde", "value": "focus"}]
+    if compare:                                 # the sharing buckets need a comparison
+        labels = _bucket_labels(compare)
+        options += [{"label": labels[k], "value": k} for k, *_ in BUCKETS if k in labels]
+    return options + [{"label": f"Yalnız {fl} projesinde", "value": "unique"}]
 
 
 def _table_styles(focus, compare):
@@ -696,6 +702,11 @@ def _height(px) -> dict:
     return {"height": f"{int(px)}px"}
 
 
+def _charts_class(compare) -> str:
+    """Chart grid layout: with a comparison, or the focus project alone ("solo")."""
+    return "row d4-charts" if compare else "row d4-charts solo"
+
+
 # --------------------------------------------------------------------------- #
 # Layout
 # --------------------------------------------------------------------------- #
@@ -715,8 +726,8 @@ def serve_layout():
             _ctrl("Odak proje", _dropdown(id="d4-focus", clearable=False,
                                           options=project_opts, value=focus)),
             _ctrl("Karşılaştırılan projeler", _dropdown(
-                id="d4-compare", multi=True, clearable=False, options=project_opts,
-                value=compare)),
+                id="d4-compare", multi=True, options=project_opts, value=compare,
+                placeholder="Karşılaştırma yok")),
             _ctrl("Tip", _dropdown(id="d4-f-tip", multi=True, placeholder="Tümü",
                                    options=_opts(items["tip"]))),
             _ctrl("Branş", _dropdown(id="d4-f-brans", multi=True, placeholder="Tümü",
@@ -747,17 +758,15 @@ def serve_layout():
 
         html.Section(id="d4-kpis", className="kpis"),
 
-        html.Section(className="row grid-3", children=[
-            html.Div(className="card span-2", children=[_graph("d4-g-combos")]),
-            html.Div(className="card", children=[_graph("d4-g-sharing")]),
-        ]),
-
-        html.Section(className="row", children=[
-            html.Div(className="card full", children=[_graph("d4-g-breakdown")]),
-        ]),
-
-        html.Section(className="row grid-3", children=[
-            html.Div(className="card span-2", children=[
+        # One grid for all charts. With a comparison: combinations | focus sharing,
+        # breakdown, matrix | all-items sharing. Without one (solo) the combinations
+        # chart and the matrix hide and the two sharing charts pair up above the
+        # breakdown (styles.css).
+        html.Section(id="d4-charts", className=_charts_class(compare), children=[
+            html.Div(className="card c-combos", children=[_graph("d4-g-combos")]),
+            html.Div(className="card c-sharing", children=[_graph("d4-g-sharing")]),
+            html.Div(className="card c-breakdown", children=[_graph("d4-g-breakdown")]),
+            html.Div(className="card c-matrix", children=[
                 html.Div(className="card-head", children=[
                     html.H3("Projeler arası ortaklık"),
                     html.Span("Satırdaki projenin kalemlerinden sütundaki projede de "
@@ -765,7 +774,7 @@ def serve_layout():
                 ]),
                 _graph("d4-g-matrix"),
             ]),
-            html.Div(className="card", children=[_graph("d4-g-words")]),
+            html.Div(className="card c-sharing-all", children=[_graph("d4-g-sharing-all")]),
         ]),
 
         html.Section(className="row", children=[
@@ -832,12 +841,13 @@ FILTER_INPUTS = (
     Output("d4-g-sharing", "figure"),
     Output("d4-g-breakdown", "figure"),
     Output("d4-g-matrix", "figure"),
-    Output("d4-g-words", "figure"),
+    Output("d4-g-sharing-all", "figure"),
     Output("d4-g-combos", "style"),
     Output("d4-g-sharing", "style"),
     Output("d4-g-breakdown", "style"),
     Output("d4-g-matrix", "style"),
-    Output("d4-g-words", "style"),
+    Output("d4-g-sharing-all", "style"),
+    Output("d4-charts", "className"),
     Output("d4-focus", "options"),
     Output("d4-compare", "options"),
     Output("d4-f-tip", "options"),
@@ -860,23 +870,28 @@ def update(focus, compare, tips, branslar, alt_branslar, ureticiler, query, brea
     n_groups = min(TOP_GROUPS, dff.loc[dff[focus], breakdown].nunique())
     breakdown_h = max(340, 144 + 26 * n_groups)   # full-width row; 12 groups -> 456px
     matrix_h = max(380, 70 + 40 * len(projects))
+    # all-items sharing: as tall as the matrix card beside it (+ its heading), or,
+    # alone with the focus sharing chart, as tall as that one
+    sharing_all_h = matrix_h + 44 if compare else combos_h
 
     status = (f"{_n(len(dff))} / {_n(len(items))} kalem  ·  "
               f"kaynak: {os.path.basename(DATA_PATH)}")
     project_opts = [{"label": _label(p), "value": p} for p in projects]
     compare_opts = [{**o, "disabled": o["value"] == focus} for o in project_opts]
+    # Without a comparison the combinations chart and the matrix are hidden, so skip them.
     return (
         status,
         _project_cards(dff, projects, focus, compare),
         _answer(dff, focus, compare, note),
         _kpis(dff, focus, compare, len(projects)),
-        fig_combos(dff, focus, compare, combos_h),
-        fig_sharing(dff, focus, len(projects), combos_h),     # same row as the combos chart
+        fig_combos(dff, focus, compare, combos_h) if compare else no_update,
+        fig_sharing(dff, projects, combos_h, focus),
         fig_breakdown(dff, breakdown, focus, compare, breakdown_h),
-        fig_matrix(dff, projects, focus, compare, matrix_h),
-        fig_words(dff, matrix_h + 44),          # + the matrix card's heading
+        fig_matrix(dff, projects, focus, compare, matrix_h) if compare else no_update,
+        fig_sharing(dff, projects, sharing_all_h),
         _height(combos_h), _height(combos_h), _height(breakdown_h),
-        _height(matrix_h), _height(matrix_h + 44),
+        _height(matrix_h), _height(sharing_all_h),
+        _charts_class(compare),
         project_opts, compare_opts,
         _opts(items["tip"]), _opts(items["brans"]),
         _opts(items["alt_brans"]), _opts(items["uretici"]),
@@ -929,8 +944,8 @@ def update_table(focus, compare, tips, branslar, alt_branslar, ureticiler, query
     prevent_initial_call=True,
 )
 def _sync_selection(_cards, _cmps, matrix_click, focus, compare, scope):
-    """Cards, the matrix and both dropdowns drive one focus project plus a
-    non-empty list of other projects to compare it with."""
+    """Cards, the matrix and both dropdowns drive one focus project plus the
+    other projects to compare it with (maybe none)."""
     projects = get_data().projects
     compare = [compare] if isinstance(compare, str) else list(compare or [])
     before = (focus, compare)
@@ -945,9 +960,7 @@ def _sync_selection(_cards, _cmps, matrix_click, focus, compare, scope):
             if p != focus:
                 compare = [focus if c == p else c for c in compare]
                 focus = p
-        elif p in compare:                      # "Çıkar": the last one stays
-            if len(compare) == 1:
-                return no_update, no_update, no_update
+        elif p in compare:                      # "Çıkar"
             compare = [c for c in compare if c != p]
         elif p != focus:                        # "+ Karşılaştır"
             compare = compare + [p]
@@ -958,7 +971,8 @@ def _sync_selection(_cards, _cmps, matrix_click, focus, compare, scope):
             return no_update, no_update, no_update
         focus, compare = row, [col]
     focus, compare = _pick(projects, focus, compare)
-    new_scope = "all" if scope == "bazi" and len(compare) == 1 else no_update
+    offered = {o["value"] for o in _scope_options(focus, compare)}
+    new_scope = no_update if scope in offered else "all"   # e.g. "bazi" with one project left
     if (focus, compare) == before:
         return no_update, no_update, new_scope
     return focus, compare, new_scope
@@ -983,16 +997,8 @@ def _scope_from_bar(_clicks):
     Output("d4-search", "value"),
     Output("d4-scope", "value", allow_duplicate=True),
     Input("d4-clear", "n_clicks"),
-    Input("d4-g-words", "clickData"),
-    State("d4-search", "value"),
     prevent_initial_call=True,
 )
-def _filter_shortcuts(_clear, word_click, query):
-    """'Temizle' resets every filter and the table view; a keyword bar is
-    appended to the search."""
-    if ctx.triggered_id == "d4-clear":
-        return None, None, None, None, "", "all"
-    word = (((word_click or {}).get("points") or [{}])[0]).get("y")
-    if not word or _norm(word) in _terms(query):
-        return (no_update,) * 6
-    return no_update, no_update, no_update, no_update, f"{query or ''} {word}".strip(), no_update
+def _clear_filters(_clear):
+    """'Temizle' resets every filter and the table view."""
+    return None, None, None, None, "", "all"

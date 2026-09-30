@@ -317,6 +317,14 @@ body {
 /* ---- Panel 4 cards shrink with the page: charts re-fit, the wide table scrolls inside ---- */
 .d4 .row > .card { min-width: 0; }
 
+/* ---- Panel 4 chart grid: with a comparison, or the focus project alone (.solo) ---- */
+.d4-charts { grid-template-columns: repeat(6, 1fr); }
+.d4-charts .c-combos, .d4-charts .c-matrix { grid-column: span 4; }
+.d4-charts .c-sharing, .d4-charts .c-sharing-all { grid-column: span 2; }
+.d4-charts .c-breakdown { grid-column: 1 / -1; }
+.d4-charts.solo .c-combos, .d4-charts.solo .c-matrix { display: none; }
+.d4-charts.solo .c-sharing, .d4-charts.solo .c-sharing-all { grid-column: span 3; order: -1; }
+
 /* ---- Table scope pills ---- */
 .scope { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 2px 12px; }
 .scope label {
