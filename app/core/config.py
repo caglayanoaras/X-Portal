@@ -18,7 +18,7 @@ class Settings(BaseSettings):
 
     # Data Panels (embedded Dash dashboards)
     APP_TITLE: str = "Veri Panoları"          # dashboards' landing header / tab title
-    DATA1_PATH: str = "dummy_data1.xlsx"       # relative paths resolve under app/static/data
+    DATA1_PATH: str = "dummy_data1.xlsx"       # relative paths resolve under app/data
     DATA2_PATH: str = "dummy_data2.xlsx"
     DATA3_PATH: str = "dummy_data3.xlsx"
     DATA4_PATH: str = "dummy_data4.xlsx"

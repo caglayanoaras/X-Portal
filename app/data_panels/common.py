@@ -25,7 +25,8 @@ from app.core.config import settings
 # Paths
 # --------------------------------------------------------------------------- #
 ROOT = os.path.dirname(os.path.abspath(__file__))              # app/data_panels
-DATA_DIR = os.path.join(os.path.dirname(ROOT), "static", "data")  # app/static/data
+# Exports stay out of app/static: the portal serves /static without login.
+DATA_DIR = os.path.join(os.path.dirname(ROOT), "data")         # app/data
 
 
 def data_path(name: str) -> str:
@@ -34,7 +35,7 @@ def data_path(name: str) -> str:
 
 def resolve_data(settings_key: str, default_name: str) -> str:
     """Data-file path from the portal config (app.core.config.settings).
-    Relative paths resolve under app/static/data; absolute paths are used as-is."""
+    Relative paths resolve under app/data; absolute paths are used as-is."""
     p = getattr(settings, settings_key, None) or default_name
     return p if os.path.isabs(p) else os.path.join(DATA_DIR, p)
 
