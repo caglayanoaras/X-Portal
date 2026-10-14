@@ -19,6 +19,9 @@ MANUFACTURER lists every manufacturer of an item in that one column, separated
 by ";" ("A; B"); a single name is a one-item list. The Üretici filter keeps an
 item when any of its manufacturers is selected, and the Üretici breakdown counts
 the item under each of them.
+DIMENSION (optional) is the item's size as free text ("0.003 - 0.5", "a=3.2 mm"),
+often empty for non-metals. It shows as "Boyut" in the table and is searched;
+exports without the column still load.
 Photos: drop `assets/projects/<slug>.jpg|jpeg|png|webp`, where slug is the
 lower-case ASCII project code (ÖRNEK -> ornek.jpg, PROJE-2 -> proje-2.jpg).
 Projects without a photo show assets/projects/_placeholder.svg.
@@ -59,8 +62,11 @@ COLUMN_MAP = {
     "DESIGNATION": "tanim",
 }
 TEXT_COLS = list(COLUMN_MAP.values())
+DIMENSION_COL = "DIMENSION"             # optional: free-text size, may be empty
+TABLE_COLS = TEXT_COLS + ["boyut"]       # text columns of the item table
 COLUMN_LABELS = {"tip": "Tip", "brans": "Branş", "alt_brans": "Alt branş",
-                 "spec": "Spesifikasyon", "uretici": "Üretici", "tanim": "Tanım"}
+                 "spec": "Spesifikasyon", "uretici": "Üretici", "tanim": "Tanım",
+                 "boyut": "Boyut"}
 LIST_SEP = ";"           # MANUFACTURER holds several manufacturers: "A; B"
 
 # Display names where the export header differs from the project's name;
@@ -74,7 +80,7 @@ TOP_GROUPS = 12          # bars in the breakdown chart
 TOP_COMBOS = 16          # bars in the combinations chart
 HOVER_COMBOS = 10        # combinations listed when hovering a "kaç projede" bar
 TABLE_WIDTHS = {"tip": 120, "brans": 110, "alt_brans": 170,   # min px per text column
-                "spec": 125, "uretici": 190, "tanim": 280}
+                "spec": 125, "uretici": 190, "tanim": 280, "boyut": 120}
 
 # Focus-project items by how many of the compared projects also use them
 # (key, colour, text class inside the answer bar). "bazi" exists only when
@@ -148,8 +154,9 @@ def _tip(text: str, cls: str = "") -> dict:
 # --------------------------------------------------------------------------- #
 # Data: one row per item, text columns + one bool column per project
 # --------------------------------------------------------------------------- #
-# items: text columns + "ureticiler" (tuple of manufacturers), "search", "n_proj"
-# and one bool column per project; projects: project codes in export order.
+# items: text columns + "boyut" (size text), "ureticiler" (tuple of manufacturers),
+# "search", "n_proj" and one bool column per project; projects: project codes in
+# export order.
 # (No dataclass: Dash executes page modules without registering them in
 # sys.modules, which dataclasses need.)
 Catalog = namedtuple("Catalog", "items projects")
@@ -191,9 +198,14 @@ def _build(df: pd.DataFrame) -> Catalog:
     items = pd.DataFrame({dst: df[src].map(_as_text) for src, dst in COLUMN_MAP.items()})
     makers = items["uretici"].map(_split_list)
     items["uretici"] = makers.map(f"{LIST_SEP} ".join)     # shown tidied: "A; B"
+    # no size stays blank: "(Boş)" is only for the filter dropdowns
+    items["boyut"] = (df[DIMENSION_COL].map(_as_text).str.strip()
+                      if DIMENSION_COL in df.columns else "")
     hay = items[TEXT_COLS[0]]
     for c in TEXT_COLS[1:]:
         hay = hay + " " + items[c]
+    # the size also without spaces, so "3.2mm" finds "a=3.2 mm"
+    hay = hay + " " + items["boyut"] + " " + items["boyut"].str.replace(r"\s+", "", regex=True)
     items["search"] = hay.str.translate(_FOLD).str.lower()
     for c in TEXT_COLS:
         items[c] = C.clean_code(items[c])       # blanks -> (Boş)
@@ -202,7 +214,8 @@ def _build(df: pd.DataFrame) -> Catalog:
 
     projects = []
     for col in df.columns:
-        if col in COLUMN_MAP or col.startswith("Unnamed") or df[col].isna().all():
+        if (col in COLUMN_MAP or col == DIMENSION_COL or col.startswith("Unnamed")
+                or df[col].isna().all()):
             continue
         flags = _as_bool(df[col])
         if flags is not None:
@@ -950,11 +963,11 @@ def update_table(focus, compare, tips, branslar, alt_branslar, ureticiler, query
     masks = _masks(dff, focus, compare)
     view = dff[masks[scope]] if scope in masks else dff
 
-    out = view[TEXT_COLS].copy()
+    out = view[TABLE_COLS].copy()
     for p in projects:
         out[p] = np.where(view[p], "✓", "")
     out["n_proj"] = view["n_proj"]
-    columns = ([{"name": COLUMN_LABELS[c], "id": c} for c in TEXT_COLS]
+    columns = ([{"name": COLUMN_LABELS[c], "id": c} for c in TABLE_COLS]
                + [{"name": "Proje sayısı", "id": "n_proj", "type": "numeric"}]
                + [{"name": _label(p), "id": p} for p in projects])
     header_styles, data_styles = _table_styles(focus, compare)
