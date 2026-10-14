@@ -9,9 +9,16 @@
   
 @font-face {
   font-family: "Gotham-Medium";
-  src: 
+  src:
     url("../webfonts/Gotham-Medium.otf") format("opentype"),
     url("../webfonts/GOTHAM-MEDIUM.TTF") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: "Gotham-Light";
+  src: url("../webfonts/Gotham-Light.otf") format("opentype");
   font-weight: 400;
   font-style: normal;
 }

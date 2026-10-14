@@ -8,8 +8,6 @@
     /* Brand colors come from the portal config (COMPANY_COLOR1 / COMPANY_COLOR2). */
     --brand-blue: {{ company_color1 }};
     --brand-red: {{ company_color2 }};
-    --brand-blue-2: color-mix(in srgb, var(--brand-blue), white 12%);     /* lighter gradient stop */
-    --brand-blue-dark: color-mix(in srgb, var(--brand-blue), black 26%);  /* darker gradient stop */
     --page-bg: #f4f5f9;
     --ink: #20242f;
     --muted: #6b7280;
@@ -19,30 +17,46 @@
 
   .dash-wrap { max-width: 1180px; margin: 0 auto; padding: 26px 16px 60px; }
 
-  /* ---- Hero ---- */
+  /* ---- Header: type on the page background, facts on the right, one red mark ---- */
   .dash-hero {
-    position: relative; overflow: hidden;
-    border-radius: 20px; padding: 32px 36px;
-    background: linear-gradient(120deg, var(--brand-blue) 0%, var(--brand-blue-2) 58%, var(--brand-blue-dark) 100%);
-    color: #fff; box-shadow: 0 16px 38px rgba(38, 54, 133, .22);
-    margin-bottom: 30px;
+    position: relative; display: grid; grid-template-columns: 1fr auto; align-items: end;
+    gap: 22px 48px; padding: 26px 2px 26px; margin-bottom: 28px;
+    border-bottom: 1px solid var(--hair);
   }
-  .dash-hero::after {
-    content: ""; position: absolute; right: -70px; top: -70px; width: 260px; height: 260px;
-    background: radial-gradient(circle, color-mix(in srgb, var(--brand-red) 38%, transparent), transparent 70%);
-    border-radius: 50%; pointer-events: none;
+  .dash-hero::after {                       /* brand red mark sitting on the hairline */
+    content: ""; position: absolute; left: 2px; bottom: -2px; width: 56px; height: 3px;
+    background: var(--brand-red);
+  }
+  .hero-kicker {
+    margin: 0 0 12px; font-family: "Gotham-Medium", "Gotham-Book", sans-serif;
+    font-size: 12px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--brand-blue);
   }
   .dash-hero h1 {
-    font-family: "Gotham-Medium", "Gotham-Book", sans-serif; font-weight: 700;
-    font-size: clamp(22px, 3vw, 31px); margin: 0 0 6px; letter-spacing: .2px; position: relative;
+    margin: 0; font-family: "Gotham-Book", sans-serif; font-weight: 400;
+    font-size: clamp(28px, 3.4vw, 42px); line-height: 1.12; letter-spacing: -.4px; color: var(--ink);
   }
-  .dash-hero p { margin: 0; opacity: .86; font-size: 15px; position: relative; }
-  .dash-hero .meta {
-    margin-top: 18px; display: flex; gap: 22px; flex-wrap: wrap; font-size: 13px;
-    opacity: .95; position: relative;
+  .dash-hero h1 span { font-family: "Gotham-Medium", "Gotham-Book", sans-serif; color: var(--brand-blue); }
+  .hero-sub { margin: 12px 0 0; font-size: 15px; color: var(--muted); }
+
+  /* one grid for all facts, so the values share a baseline whatever their size */
+  .hero-facts {
+    display: grid; grid-auto-flow: column; grid-template-rows: auto auto;
+    align-items: baseline; margin: 0 0 4px;
   }
-  .dash-hero .meta span { display: inline-flex; align-items: center; gap: 7px; }
-  .dash-hero .meta i { opacity: .7; }
+  .hero-facts > div { display: contents; }
+  .hero-facts > div + div > * { padding-left: 28px; margin-left: 28px; border-left: 1px solid var(--hair); }
+  .hero-facts dt {
+    padding-bottom: 8px; font-weight: 400; font-size: 11px; letter-spacing: 1px;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .hero-facts dd {
+    margin: 0; font-family: "Gotham-Light", "Gotham-Book", sans-serif;
+    font-size: 34px; line-height: 34px; color: var(--ink);
+  }
+
+  @media (max-width: 720px) {
+    .dash-hero { grid-template-columns: 1fr; }
+  }
 
   /* ---- Section label ---- */
   .dash-section-title {
@@ -91,12 +105,17 @@
 <div class="dash-wrap">
 
   <section class="dash-hero">
-    <h1>Welcome back, {{ user.name }} {{ user.surname }}</h1>
-    <p>{{ user.title or user.usertype.value }} · Choose a module to get started.</p>
-    <div class="meta">
-      <span><i class="fas fa-layer-group"></i><b>{{ user.modules|length }}</b>&nbsp;module{{ '' if user.modules|length == 1 else 's' }} available</span>
-      <span><i class="fas fa-user"></i>Signed in as <b>{{ user.username }}</b></span>
+    <div>
+      <p class="hero-kicker">{{ user.title or user.usertype.value }}</p>
+      <h1>Welcome back, <span>{{ user.name }} {{ user.surname }}</span></h1>
+      <p class="hero-sub">Choose a module to get started.</p>
     </div>
+    <dl class="hero-facts">
+      <div>
+        <dt>Module{{ '' if user.modules|length == 1 else 's' }}</dt>
+        <dd>{{ user.modules|length }}</dd>
+      </div>
+    </dl>
   </section>
 
   <div class="dash-section-title">Your modules</div>
