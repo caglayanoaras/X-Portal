@@ -15,6 +15,10 @@ its items (and all items) are used in. Self-contained like dashboards 1-3; share
 atoms come from `common` / `theme`.
 
 Data: data/dummy_data4.xlsx (env DATA4_PATH). Header on row 1 -> skiprows=0.
+MANUFACTURER lists every manufacturer of an item in that one column, separated
+by ";" ("A; B"); a single name is a one-item list. The Üretici filter keeps an
+item when any of its manufacturers is selected, and the Üretici breakdown counts
+the item under each of them.
 Photos: drop `assets/projects/<slug>.jpg|jpeg|png|webp`, where slug is the
 lower-case ASCII project code (ÖRNEK -> ornek.jpg, PROJE-2 -> proje-2.jpg).
 Projects without a photo show assets/projects/_placeholder.svg.
@@ -57,6 +61,7 @@ COLUMN_MAP = {
 TEXT_COLS = list(COLUMN_MAP.values())
 COLUMN_LABELS = {"tip": "Tip", "brans": "Branş", "alt_brans": "Alt branş",
                  "spec": "Spesifikasyon", "uretici": "Üretici", "tanim": "Tanım"}
+LIST_SEP = ";"           # MANUFACTURER holds several manufacturers: "A; B"
 
 # Display names where the export header differs from the project's name;
 # every other project column is shown as-is.
@@ -69,7 +74,7 @@ TOP_GROUPS = 12          # bars in the breakdown chart
 TOP_COMBOS = 16          # bars in the combinations chart
 HOVER_COMBOS = 10        # combinations listed when hovering a "kaç projede" bar
 TABLE_WIDTHS = {"tip": 120, "brans": 110, "alt_brans": 170,   # min px per text column
-                "spec": 125, "uretici": 150, "tanim": 280}
+                "spec": 125, "uretici": 190, "tanim": 280}
 
 # Focus-project items by how many of the compared projects also use them
 # (key, colour, text class inside the answer bar). "bazi" exists only when
@@ -143,9 +148,10 @@ def _tip(text: str, cls: str = "") -> dict:
 # --------------------------------------------------------------------------- #
 # Data: one row per item, text columns + one bool column per project
 # --------------------------------------------------------------------------- #
-# items: text columns + "search", "n_proj" and one bool column per project;
-# projects: project codes in export order. (No dataclass: Dash executes page
-# modules without registering them in sys.modules, which dataclasses need.)
+# items: text columns + "ureticiler" (tuple of manufacturers), "search", "n_proj"
+# and one bool column per project; projects: project codes in export order.
+# (No dataclass: Dash executes page modules without registering them in
+# sys.modules, which dataclasses need.)
 Catalog = namedtuple("Catalog", "items projects")
 
 
@@ -169,6 +175,12 @@ def _as_text(v) -> str:
     return str(v)
 
 
+def _split_list(text) -> tuple:
+    """'A; B;; A' -> ('A', 'B'): the values in a list cell, in order, without
+    blanks or repeats."""
+    return tuple(dict.fromkeys(p.strip() for p in text.split(LIST_SEP) if p.strip()))
+
+
 def _build(df: pd.DataFrame) -> Catalog:
     df = df.dropna(how="all").reset_index(drop=True)
     missing = [src for src in COLUMN_MAP if src not in df.columns]
@@ -177,12 +189,16 @@ def _build(df: pd.DataFrame) -> Catalog:
                          % (missing, list(df.columns)))
 
     items = pd.DataFrame({dst: df[src].map(_as_text) for src, dst in COLUMN_MAP.items()})
+    makers = items["uretici"].map(_split_list)
+    items["uretici"] = makers.map(f"{LIST_SEP} ".join)     # shown tidied: "A; B"
     hay = items[TEXT_COLS[0]]
     for c in TEXT_COLS[1:]:
         hay = hay + " " + items[c]
     items["search"] = hay.str.translate(_FOLD).str.lower()
     for c in TEXT_COLS:
         items[c] = C.clean_code(items[c])       # blanks -> (Boş)
+    # filters and the breakdown use the tuple; no manufacturer -> (Boş), like blanks
+    items["ureticiler"] = makers.map(lambda ms: ms or (C.EMPTY_LABEL,))
 
     projects = []
     for col in df.columns:
@@ -211,16 +227,29 @@ def _terms(query) -> list[str]:
 
 def _filter(items, tips, branslar, alt_branslar, ureticiler, query):
     mask = pd.Series(True, index=items.index)
-    for col, sel in (("tip", tips), ("brans", branslar),
-                     ("alt_brans", alt_branslar), ("uretici", ureticiler)):
+    for col, sel in (("tip", tips), ("brans", branslar), ("alt_brans", alt_branslar)):
         if sel:
             mask &= items[col].isin(sel)
+    if ureticiler:                              # any of the item's manufacturers
+        sel = set(ureticiler)
+        mask &= items["ureticiler"].map(lambda ms: not sel.isdisjoint(ms))
     for term in _terms(query):                  # every word must match
         hit = pd.Series(False, index=items.index)
         for alt in (term, *SYNONYMS.get(term, ())):
             hit |= items["search"].str.contains(alt, regex=False)
         mask &= hit
     return items[mask]
+
+
+def _maker_opts(items):
+    """Üretici options: each manufacturer once, though a cell may list several."""
+    return _opts(items["ureticiler"].explode())
+
+
+def _group_col(dim) -> str:
+    """Column the breakdown groups by. For Üretici it is the manufacturer tuples:
+    exploded, an item counts under each of its manufacturers."""
+    return "ureticiler" if dim == "uretici" else dim
 
 
 def _pick(projects, focus, compare):
@@ -401,7 +430,8 @@ def fig_breakdown(dff, dim, focus, compare, height):
     else:                                       # no comparison: one plain bar per group
         series = [("focus", T.SHARE_ALL, f"{fl} kalemleri")]
     keys = [k for k, *_ in series]
-    parts = pd.DataFrame({"key": dff[dim], **{k: m[k] for k in keys}})[m["focus"]]
+    parts = pd.DataFrame({"key": dff[_group_col(dim)], **{k: m[k] for k in keys}})[m["focus"]]
+    parts = parts.explode("key")                # one row per manufacturer; no-op elsewhere
     if parts.empty:
         return _empty_fig(f"{fl} projesinde filtreye uyan kalem yok")
     g = parts.groupby("key")[keys].sum()
@@ -423,6 +453,8 @@ def fig_breakdown(dff, dim, focus, compare, height):
     notes = [f"Karşılaştırılan: {_names(compare)}"] if compare else []
     if len(g) > TOP_GROUPS:
         notes.append(f"en çok kalem içeren ilk {TOP_GROUPS} grup")
+    if parts.index.has_duplicates:              # an item listed under several manufacturers
+        notes.append("birden çok üreticisi olan kalem her üreticisinde sayılır")
     sub = " · ".join(notes)
     fig.update_layout(
         title=_title(f"{BREAKDOWNS[dim]} bazında {fl} kalemleri", sub[:1].upper() + sub[1:]),
@@ -735,7 +767,7 @@ def serve_layout():
             _ctrl("Alt branş", _dropdown(id="d4-f-altbrans", multi=True, placeholder="Tümü",
                                          options=_opts(items["alt_brans"]))),
             _ctrl("Üretici", _dropdown(id="d4-f-uretici", multi=True, placeholder="Tümü",
-                                       options=_opts(items["uretici"]))),
+                                       options=_maker_opts(items))),
             _ctrl("Kırılım", _dropdown(id="d4-breakdown", clearable=False,
                                        options=[{"label": v, "value": k}
                                                 for k, v in BREAKDOWNS.items()],
@@ -867,7 +899,7 @@ def update(focus, compare, tips, branslar, alt_branslar, ureticiler, query, brea
     note = _filters_note(tips, branslar, alt_branslar, ureticiler, query)
 
     combos_h = 76 + 190 + 26 * (1 + len(compare)) + 50
-    n_groups = min(TOP_GROUPS, dff.loc[dff[focus], breakdown].nunique())
+    n_groups = min(TOP_GROUPS, dff.loc[dff[focus], _group_col(breakdown)].explode().nunique())
     breakdown_h = max(340, 144 + 26 * n_groups)   # full-width row; 12 groups -> 456px
     matrix_h = max(380, 70 + 40 * len(projects))
     # all-items sharing: as tall as the matrix card beside it (+ its heading), or,
@@ -894,7 +926,7 @@ def update(focus, compare, tips, branslar, alt_branslar, ureticiler, query, brea
         _charts_class(compare),
         project_opts, compare_opts,
         _opts(items["tip"]), _opts(items["brans"]),
-        _opts(items["alt_brans"]), _opts(items["uretici"]),
+        _opts(items["alt_brans"]), _maker_opts(items),
     )
 
 
