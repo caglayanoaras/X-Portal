@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="16 20 150 70" fill="none" stroke-linejoin="round">
+  <!-- a countersunk screw -->
+  <path d="M24 28 L24 82 L54 63 L54 47 Z" fill="#6E79B0" stroke="#263685" stroke-width="1.6"/>
+  <path d="M29 35 V75" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" opacity=".7"/>
+  <rect x="54" y="47" width="96" height="16" fill="#EEF0F8" stroke="#263685" stroke-width="1.6"/>
+  <path d="M94 47 l5 16 M101 47 l5 16 M108 47 l5 16 M115 47 l5 16 M122 47 l5 16 M129 47 l5 16
+           M136 47 l5 16 M143 47 l5 16" stroke="#263685" stroke-width="1.2"/>
+  <path d="M150 47 L158 52 V58 L150 63 Z" fill="#EEF0F8" stroke="#263685" stroke-width="1.6"/>
+</svg>

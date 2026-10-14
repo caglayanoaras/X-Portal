@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="12 20 152 76" fill="none" stroke-linejoin="round">
+  <!-- a sheet of metal -->
+  <path d="M20 54 L96 28 L156 48 L80 74 Z" fill="#EEF0F8" stroke="#263685" stroke-width="1.6"/>
+  <path d="M20 54 L80 74 L80 88 L20 68 Z" fill="#6E79B0" stroke="#263685" stroke-width="1.6"/>
+  <path d="M80 74 L156 48 L156 62 L80 88 Z" fill="#364BA7" stroke="#263685" stroke-width="1.6"/>
+  <path d="M42 58 L100 38" stroke="#FFFFFF" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M60 60 L92 49" stroke="#FFFFFF" stroke-width="1.4" stroke-linecap="round" opacity=".8"/>
+</svg>

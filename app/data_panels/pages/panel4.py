@@ -22,6 +22,8 @@ the item under each of them.
 DIMENSION (optional) is the item's size as free text ("0.003 - 0.5", "a=3.2 mm"),
 often empty for non-metals. It shows as "Boyut" in the table and is searched;
 exports without the column still load.
+A collapsible "Kalem nedir?" card under the answer explains what one kalem is for
+metals, non-metals and standard parts (kalem_info.py).
 Photos: drop `assets/projects/<slug>.jpg|jpeg|png|webp`, where slug is the
 lower-case ASCII project code (ÖRNEK -> ornek.jpg, PROJE-2 -> proje-2.jpg).
 Projects without a photo show assets/projects/_placeholder.svg.
@@ -41,6 +43,7 @@ from dash import (ALL, Input, Output, State, callback, ctx, dash_table, dcc,
 from plotly.subplots import make_subplots
 
 import common as C
+import kalem_info as K
 import theme as T
 
 register_page(__name__, path="/panel4",
@@ -800,6 +803,7 @@ def serve_layout():
         html.Section(className="row", children=[
             html.Div(id="d4-answer", className="card full answer"),
         ]),
+        K.explainer(),                          # "Kalem nedir?" (kalem_info.py)
 
         html.Section(id="d4-kpis", className="kpis"),
 
