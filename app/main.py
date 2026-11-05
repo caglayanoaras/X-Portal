@@ -27,6 +27,8 @@ from app.api.atlas import atlas_router
 from app.api.actions import actions_router
 from app.api.data_panels import data_panels_router
 from app.data_panels.mount import guarded_dash_app, DASH_MOUNT_PATH
+from app.atlas.db import init_db as init_atlas_db
+from app.atlas.errors import AtlasError
 
 
 # region Type Aliases (Dependencies)
@@ -38,6 +40,7 @@ ActiveUserDep = Annotated[UserRead, Depends(get_current_active_user)]
 async def lifespan(app: FastAPI):
     # Load the ML model & DB
     init_db()
+    init_atlas_db()  # Atlas has its own database file; created here if missing
     yield
 
 app = FastAPI(
@@ -96,6 +99,12 @@ async def module_access_denied_handler(request: Request, exc: ModuleAccessDenied
         flash(request, "You don't have access to that module.", "error")
         return redirect_to_route(request, "dashboard")
     return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={"detail": exc.detail})
+
+
+@app.exception_handler(AtlasError)
+async def atlas_error_handler(request: Request, exc: AtlasError):
+    """Atlas errors are JSON: {"detail": ...} plus extras such as warnings / requires_force."""
+    return JSONResponse(status_code=exc.status, content={"detail": exc.detail, **exc.extra})
 
 
 # region Pages

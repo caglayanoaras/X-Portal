@@ -14,6 +14,7 @@ from app.core.exceptions import (
 )
 from app.crud.users_and_permissions import *
 from app.models import *
+from app.atlas.objects import purge_role as atlas_purge_role
 from app.dependencies.auth import (
     get_current_active_user, get_current_superadmin
 )
@@ -92,9 +93,15 @@ def update_existing_user_role(current_user: UserDep, role_id: int, role_update: 
 
 @users_and_permissions_router.delete("/userroles/{role_id}", name='delete_user_role_by_id', status_code=status.HTTP_204_NO_CONTENT)
 def delete_user_role_by_id(current_user: UserDep, role_id: int, db: SessionDep):
-    """Delete a user role by its ID."""
+    """Delete a user role by its ID. Atlas drops it from every class and object too."""
     if not delete_role(db, role_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User role not found")
+    try:
+        atlas_purge_role(role_id)
+    except Exception as exc:
+        # The role is gone either way; a role id left behind in Atlas grants nothing.
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail=f"The role was deleted, but Atlas could not drop it: {exc}")
     return None
 # endregion
 

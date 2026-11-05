@@ -208,3 +208,8 @@ __marimo__/
 
 *.xlsx
 app/data/
+# Atlas database (created on start; delete it to reset Atlas)
+atlas.db
+atlas.db-journal
+atlas.db-wal
+atlas.db-shm

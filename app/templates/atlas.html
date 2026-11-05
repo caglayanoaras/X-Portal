@@ -3,14 +3,81 @@
 {% block title %}Atlas{% endblock %}
 
 {% block styles %}
-  <!-- Styles for users and permissions. Goes to the head of the html -->
-{% endblock %}
-
-{% block scripts %}
-<!-- Scripts for users and permissions. Goes to the bottom of the body of the html -->
-  <script src="{{ url_for('static', path='/js/ag-grid-enterprise.min.js') }}"></script>
-  <script type="module" src="{{ url_for('static', path='js/apps/users-and-permissions-app.js') }}"></script>
+<link rel="stylesheet" href="{{ url_for('static', path='/css/atlas.css') }}">
 {% endblock %}
 
 {% block content %}
+<div class="atlas-shell" id="atlas-app"
+     data-url-classes="{{ url_for('atlas_api_classes') }}"
+     data-url-roles="{{ url_for('atlas_api_roles') }}"
+     data-url-admin="{{ url_for('atlas_admin_page') }}"
+     data-is-admin="{{ 'true' if is_atlas_admin else 'false' }}">
+
+  <aside class="atlas-sidebar">
+    <input type="search" class="form-control form-control-sm mb-2" id="atlas-tree-filter"
+           placeholder="Find a class" aria-label="Find a class">
+    <nav class="list-group atlas-tree" id="atlas-tree"></nav>
+    {% if is_atlas_admin %}
+    <a href="{{ url_for('atlas_admin_page') }}" class="btn btn-sm btn-outline-secondary w-100 mt-3">
+      <i class="fas fa-gear me-1"></i>Class builder
+    </a>
+    {% endif %}
+  </aside>
+
+  <main class="atlas-main">
+    <div id="atlas-message" class="text-muted text-center py-5">Loading…</div>
+
+    <section id="atlas-class" class="d-none">
+      <div class="d-flex flex-wrap gap-3 justify-content-between align-items-start mb-3">
+        <div>
+          <h3 class="mb-1" id="atlas-class-label"></h3>
+          <div class="text-muted small" id="atlas-class-description"></div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+          <div class="input-group input-group-sm atlas-search">
+            <span class="input-group-text"><i class="fas fa-search"></i></span>
+            <input type="search" class="form-control" id="atlas-search" placeholder="Search" aria-label="Search">
+          </div>
+          <button type="button" class="btn btn-primary btn-sm text-nowrap" id="atlas-new">
+            <i class="fas fa-plus me-1"></i>New
+          </button>
+        </div>
+      </div>
+      <div id="atlas-grid-error" class="alert alert-warning py-2 d-none" role="alert"></div>
+      <div id="atlas-grid"></div>
+    </section>
+  </main>
+</div>
+
+<!-- Object form -->
+<div class="modal fade" id="atlas-object-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="atlas-object-title"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="atlas-object-error" class="alert alert-danger py-2 d-none" role="alert"></div>
+        <form id="atlas-object-form" class="row g-3" autocomplete="off"></form>
+        <div id="atlas-object-incoming" class="atlas-incoming"></div>
+        <div id="atlas-object-meta" class="atlas-meta mt-3"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-danger me-auto d-none" id="atlas-object-delete">
+          <i class="fas fa-trash me-1"></i>Delete
+        </button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        <button type="button" class="btn btn-primary" id="atlas-object-save">
+          <i class="fas fa-save me-1"></i>Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', path='/js/ag-grid-enterprise.min.js') }}"></script>
+<script type="module" src="{{ url_for('static', path='js/apps/atlas-app.js') }}"></script>
 {% endblock %}

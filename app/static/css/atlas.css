@@ -1,0 +1,48 @@
+/* Atlas pages: a class list beside the content. Bootstrap does the rest. */
+.container-fluid:has(> .atlas-shell) { padding: 0; }
+
+.atlas-shell { display: flex; min-height: calc(100vh - 56px); }
+.atlas-sidebar {
+  flex: 0 0 260px; width: 260px; padding: 1rem;
+  background: #f8f9fa; border-right: 1px solid #dee2e6;
+  position: sticky; top: 0; max-height: calc(100vh - 56px); overflow-y: auto;
+}
+.atlas-main { flex: 1 1 auto; min-width: 0; padding: 1.5rem 1.75rem; }
+
+.atlas-folder {
+  margin: 1rem .5rem .25rem; font-size: .72rem; font-weight: 600;
+  letter-spacing: .06em; text-transform: uppercase; color: #6c757d;
+}
+.atlas-tree .list-group-item {
+  border: 0; border-radius: .375rem; padding: .4rem .6rem; font-size: .92rem;
+  background: transparent;
+}
+.atlas-tree .list-group-item.nested { padding-left: 1.25rem; }
+.atlas-tree .list-group-item.active { background: #263685; color: #fff; }
+.atlas-tree .list-group-item.active .text-muted { color: rgba(255, 255, 255, .7) !important; }
+
+.atlas-search { width: 240px; }
+#atlas-grid { height: calc(100vh - 230px); min-height: 360px; }
+
+.atlas-meta { font-size: .8rem; color: #6c757d; }
+.atlas-incoming .badge { font-weight: 500; }
+
+/* Class builder */
+.atlas-builder th {
+  font-size: .72rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+  color: #6c757d; white-space: nowrap;
+}
+.atlas-builder td { vertical-align: middle; }
+.atlas-builder .col-flag { width: 1%; text-align: center; }
+.atlas-builder .col-move { width: 1%; white-space: nowrap; }
+
+/* tom-select dropdowns are appended to <body> so they can leave the modal */
+.ts-dropdown { z-index: 1065; }
+
+@media (max-width: 991px) {
+  .atlas-shell { flex-direction: column; }
+  .atlas-sidebar {
+    flex: none; width: auto; position: static; max-height: none;
+    border-right: 0; border-bottom: 1px solid #dee2e6;
+  }
+}

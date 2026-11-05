@@ -1,0 +1,611 @@
+"""Atlas class definitions and the tables behind them.
+
+A class is a row in atlas_class plus its attributes (atlas_attribute) and
+relationships (atlas_relationship). Each class also has real tables:
+
+    obj_<class>           one row per object: the system columns (_id, _roles,
+                          _created_at, _created_by, _updated_at, _updated_by,
+                          _version) and one column per stored attribute
+    link_<class>__<rel>   one per relationship, rows of (source_id, target_id)
+
+Object columns are declared without a type, so SQLite keeps each value exactly
+as values.coerce() produced it. Changing an attribute's type converts the
+values in place; no table is ever rebuilt.
+
+Keys (of classes, attributes and relationships) are ASCII, used by the API and
+in table and column names, and fixed once created. Labels can change any time.
+"""
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+from app.atlas.db import transaction
+from app.atlas.errors import AtlasError
+from app.atlas.values import coerce, role_ids
+
+ATTRIBUTE_TYPES = ("string", "text", "int", "float", "boolean", "date", "datetime",
+                   "choice", "lookthrough")
+CARDINALITIES = ("one", "many")
+KEY_PATTERN = re.compile(r"[a-z](?:_?[a-z0-9])*")   # no leading, trailing or double "_"
+KEY_MAX = 40
+# Query-string words of the objects API, so no field may use them as its key.
+RESERVED_KEYS = frozenset({"q", "sort", "page", "page_size", "expand", "fields"})
+
+# System fields every object has, with the type used to filter and sort them.
+# Timestamps are UTC ISO 8601 ("2026-11-06T09:12:00Z").
+SYSTEM_FIELDS = {
+    "_id": "int",
+    "_created_at": "timestamp",
+    "_created_by": "string",
+    "_updated_at": "timestamp",
+    "_updated_by": "string",
+    "_version": "int",
+}
+
+_SYSTEM_COLUMNS = (
+    '"_id" INTEGER PRIMARY KEY AUTOINCREMENT',
+    "\"_roles\" TEXT NOT NULL DEFAULT '[]'",
+    '"_created_at" TEXT NOT NULL',
+    '"_created_by" TEXT NOT NULL',
+    '"_updated_at" TEXT NOT NULL',
+    '"_updated_by" TEXT NOT NULL',
+    '"_version" INTEGER NOT NULL DEFAULT 1',
+)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def q(name: str) -> str:
+    """Quote an SQL identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+# --------------------------------------------------------------------------- #
+# Definitions
+# --------------------------------------------------------------------------- #
+@dataclass(eq=False)
+class Attribute:
+    key: str
+    label: str
+    type: str
+    required: bool = False
+    unique: bool = False
+    title: bool = False          # part of the object's title (pickers, link columns)
+    show: bool = True            # a column in the grid by default
+    options: list = field(default_factory=list)   # choice
+    lookup: str = ""                              # lookthrough: "relationship.attribute"
+    cls: AtlasClass | None = field(default=None, repr=False)
+
+    @property
+    def stored(self) -> bool:
+        return self.type != "lookthrough"
+
+
+@dataclass(eq=False)
+class Relationship:
+    key: str
+    label: str
+    target_key: str
+    cardinality: str = "many"    # how many targets one object links to
+    required: bool = False
+    show: bool = True
+    reverse_label: str = ""      # how the link reads from the target's side
+    cls: AtlasClass | None = field(default=None, repr=False)
+    target: AtlasClass | None = field(default=None, repr=False)
+
+    @property
+    def link_table(self) -> str:
+        return f"link_{self.cls.key}__{self.key}"
+
+
+@dataclass(eq=False)
+class AtlasClass:
+    key: str
+    label: str
+    path: str = ""
+    description: str = ""
+    roles: list = field(default_factory=list)
+    attributes: list = field(default_factory=list)
+    relationships: list = field(default_factory=list)
+    id: int | None = None
+    created_at: str = ""
+    created_by: str = ""
+    updated_at: str = ""
+    updated_by: str = ""
+
+    @property
+    def table(self) -> str:
+        return f"obj_{self.key}"
+
+    @property
+    def stored_attributes(self) -> list:
+        return [a for a in self.attributes if a.stored]
+
+    def attr(self, key: str) -> Attribute | None:
+        return next((a for a in self.attributes if a.key == key), None)
+
+    def rel(self, key: str) -> Relationship | None:
+        return next((r for r in self.relationships if r.key == key), None)
+
+
+class Schema:
+    """All classes, cross-linked: relationship targets and back-references."""
+
+    def __init__(self, classes):
+        self.classes = {c.key: c for c in classes}
+        for cls in self.classes.values():
+            for attr in cls.attributes:
+                attr.cls = cls
+            for rel in cls.relationships:
+                rel.cls = cls
+                rel.target = self.classes.get(rel.target_key)
+
+    def get(self, key: str) -> AtlasClass:
+        cls = self.classes.get(key)
+        if cls is None:
+            raise AtlasError(404, f"There is no class '{key}'.")
+        return cls
+
+    def incoming(self, cls: AtlasClass) -> list:
+        """Relationships (of any class, this one included) that point at cls."""
+        return [r for c in self.classes.values() for r in c.relationships if r.target is cls]
+
+    def resolve(self, attr: Attribute, _seen=None) -> tuple[list, Attribute]:
+        """A look-through as (the relationships it follows, the stored attribute it ends on)."""
+        if attr.stored:
+            return [], attr
+        seen = _seen if _seen is not None else set()
+        where = f"{attr.cls.label} › {attr.label}"
+        if id(attr) in seen:
+            raise AtlasError(400, f"The look-through '{where}' loops back on itself.")
+        seen.add(id(attr))
+        rel_key, _, attr_key = attr.lookup.partition(".")
+        rel = attr.cls.rel(rel_key)
+        if rel is None:
+            raise AtlasError(400, f"The look-through '{where}' uses '{rel_key}', "
+                                  f"which is not a relationship of {attr.cls.label}.")
+        target = rel.target.attr(attr_key) if rel.target else None
+        if target is None:
+            target_label = rel.target.label if rel.target else rel.target_key
+            raise AtlasError(400, f"The look-through '{where}' uses '{attr.lookup}', "
+                                  f"but {target_label} has no attribute '{attr_key}'.")
+        rels, final = self.resolve(target, seen)
+        return [rel, *rels], final
+
+
+def load_schema(conn) -> Schema:
+    classes = {}
+    for row in conn.execute("SELECT * FROM atlas_class ORDER BY path, label"):
+        classes[row["id"]] = AtlasClass(
+            key=row["key"], label=row["label"], path=row["path"], description=row["description"],
+            roles=json.loads(row["roles"]), id=row["id"],
+            created_at=row["created_at"], created_by=row["created_by"],
+            updated_at=row["updated_at"], updated_by=row["updated_by"])
+    for row in conn.execute("SELECT * FROM atlas_attribute ORDER BY class_id, position, id"):
+        classes[row["class_id"]].attributes.append(Attribute(
+            key=row["key"], label=row["label"], type=row["type"], required=bool(row["required"]),
+            unique=bool(row["is_unique"]), title=bool(row["is_title"]), show=bool(row["show"]),
+            options=json.loads(row["options"]), lookup=row["lookup"]))
+    keys = {class_id: cls.key for class_id, cls in classes.items()}
+    for row in conn.execute("SELECT * FROM atlas_relationship ORDER BY class_id, position, id"):
+        classes[row["class_id"]].relationships.append(Relationship(
+            key=row["key"], label=row["label"], target_key=keys.get(row["target_class_id"], ""),
+            cardinality=row["cardinality"], required=bool(row["required"]), show=bool(row["show"]),
+            reverse_label=row["reverse_label"]))
+    return Schema(classes.values())
+
+
+# --------------------------------------------------------------------------- #
+# Parsing a definition sent to the API
+# --------------------------------------------------------------------------- #
+_CLASS_FIELDS = {"key", "label", "path", "description", "roles", "attributes", "relationships"}
+_ATTRIBUTE_FIELDS = {"key", "label", "type", "required", "unique", "title", "show", "options", "lookup"}
+_RELATIONSHIP_FIELDS = {"key", "label", "target", "cardinality", "required", "show", "reverse_label"}
+# Read-only fields a GET returns, so PUTting that same JSON back just works.
+_READ_ONLY_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", "permissions",
+                     "incoming", "value_type", "many", "target_label"}
+
+
+def check_key(value, what: str) -> str:
+    if not isinstance(value, str) or len(value) > KEY_MAX or not KEY_PATTERN.fullmatch(value):
+        raise AtlasError(400, f"{what} must use lower-case letters, digits and single underscores, "
+                              f"start with a letter and be at most {KEY_MAX} characters (e.g. batch_no).")
+    return value
+
+
+def _unknown(data: dict, allowed: set, what: str) -> None:
+    extra = sorted(set(data) - allowed - _READ_ONLY_FIELDS)
+    if extra:
+        raise AtlasError(400, f"Unknown field(s) in {what}: {', '.join(extra)}.")
+
+
+def _text(value, what: str, *, required: bool = False, limit: int = 200) -> str:
+    if value is None:
+        value = ""
+    if not isinstance(value, str):
+        raise AtlasError(400, f"{what} must be text.")
+    value = value.strip()
+    if required and not value:
+        raise AtlasError(400, f"{what} is required.")
+    if len(value) > limit:
+        raise AtlasError(400, f"{what} is longer than {limit} characters.")
+    return value
+
+
+def _flag(value, what: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool) or (isinstance(value, int) and value in (0, 1)):
+        return bool(value)
+    raise AtlasError(400, f"{what} must be true or false.")
+
+
+def _items(value, what: str) -> list:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise AtlasError(400, f"{what} must be a list.")
+    return value
+
+
+def _path(value) -> str:
+    text = _text(value, "The folder")
+    return "/".join(part.strip() for part in text.replace("\\", "/").split("/") if part.strip())
+
+
+def _parse_attribute(item, n: int) -> Attribute:
+    if not isinstance(item, dict):
+        raise AtlasError(400, f"Attribute {n} must be an object.")
+    _unknown(item, _ATTRIBUTE_FIELDS, f"attribute {n}")
+    label = _text(item.get("label"), f"The label of attribute {n}", required=True, limit=100)
+    key = check_key(item.get("key"), f"The key of '{label}'")
+    atype = item.get("type") or "string"
+    if atype not in ATTRIBUTE_TYPES:
+        raise AtlasError(400, f"'{label}' has an unknown type '{atype}'. Types: {', '.join(ATTRIBUTE_TYPES)}.")
+    attr = Attribute(
+        key=key, label=label, type=atype,
+        required=_flag(item.get("required"), f"'{label}' required", False),
+        unique=_flag(item.get("unique"), f"'{label}' unique", False),
+        title=_flag(item.get("title"), f"'{label}' title", False),
+        show=_flag(item.get("show"), f"'{label}' show", True))
+    if atype == "choice":
+        options = item.get("options")
+        if not isinstance(options, list):
+            raise AtlasError(400, f"The choice '{label}' needs a list of options.")
+        for option in options:
+            if option is None or isinstance(option, (dict, list)):
+                raise AtlasError(400, f"The options of '{label}' must be text.")
+            text = str(option).strip()
+            if text and text not in attr.options:
+                attr.options.append(text)
+        if not attr.options:
+            raise AtlasError(400, f"The choice '{label}' needs at least one option.")
+    if atype == "lookthrough":
+        lookup = item.get("lookup")
+        if not isinstance(lookup, str) or not re.fullmatch(r"[a-z0-9_]+\.[a-z0-9_]+", lookup.strip()):
+            raise AtlasError(400, f"The look-through '{label}' needs a lookup like 'relationship.attribute'.")
+        attr.lookup = lookup.strip()
+        if attr.required or attr.unique:
+            raise AtlasError(400, f"The look-through '{label}' can't be required or unique.")
+    return attr
+
+
+def _parse_relationship(item, n: int) -> Relationship:
+    if not isinstance(item, dict):
+        raise AtlasError(400, f"Relationship {n} must be an object.")
+    _unknown(item, _RELATIONSHIP_FIELDS, f"relationship {n}")
+    label = _text(item.get("label"), f"The label of relationship {n}", required=True, limit=100)
+    key = check_key(item.get("key"), f"The key of '{label}'")
+    target = item.get("target")
+    if not isinstance(target, str) or not target:
+        raise AtlasError(400, f"The relationship '{label}' needs a target class.")
+    cardinality = item.get("cardinality") or "many"
+    if cardinality not in CARDINALITIES:
+        raise AtlasError(400, f"The cardinality of '{label}' must be 'one' or 'many'.")
+    return Relationship(
+        key=key, label=label, target_key=target, cardinality=cardinality,
+        required=_flag(item.get("required"), f"'{label}' required", False),
+        show=_flag(item.get("show"), f"'{label}' show", True),
+        reverse_label=_text(item.get("reverse_label"), f"The reverse label of '{label}'", limit=100))
+
+
+def parse_definition(payload, *, key: str | None = None) -> AtlasClass:
+    """Validate a class definition: a POST body, or a PUT body with the key from the URL."""
+    if not isinstance(payload, dict):
+        raise AtlasError(400, "Send the class definition as a JSON object.")
+    _unknown(payload, _CLASS_FIELDS, "the class")
+    if key is None:
+        key = check_key(payload.get("key"), "The class key")
+    elif payload.get("key") not in (None, key):
+        raise AtlasError(400, "A class key can't be changed.")
+    try:
+        roles = role_ids(payload.get("roles"))
+    except ValueError as exc:
+        raise AtlasError(400, f"roles {exc}.") from None
+    cls = AtlasClass(
+        key=key,
+        label=_text(payload.get("label"), "The class label", required=True, limit=100),
+        path=_path(payload.get("path")),
+        description=_text(payload.get("description"), "The description", limit=2000),
+        roles=roles)
+    used = set()
+
+    def claim(member_key: str) -> None:
+        if member_key in RESERVED_KEYS:
+            raise AtlasError(400, f"'{member_key}' is reserved by the API; choose another key.")
+        if member_key in used:
+            raise AtlasError(400, f"The key '{member_key}' is used twice; keys must be unique within a class.")
+        used.add(member_key)
+
+    for n, item in enumerate(_items(payload.get("attributes"), "attributes"), start=1):
+        attr = _parse_attribute(item, n)
+        claim(attr.key)
+        attr.cls = cls
+        cls.attributes.append(attr)
+    for n, item in enumerate(_items(payload.get("relationships"), "relationships"), start=1):
+        rel = _parse_relationship(item, n)
+        claim(rel.key)
+        rel.cls = cls
+        cls.relationships.append(rel)
+    return cls
+
+
+def _validate(schema: Schema) -> None:
+    for cls in schema.classes.values():
+        for rel in cls.relationships:
+            if rel.target is None:
+                raise AtlasError(400, f"'{cls.label} › {rel.label}' points at '{rel.target_key}', "
+                                      f"which is not a class.")
+        for attr in cls.attributes:
+            if not attr.stored:
+                schema.resolve(attr)
+
+
+# --------------------------------------------------------------------------- #
+# Saving definitions (and the DDL that goes with them)
+# --------------------------------------------------------------------------- #
+def _unique_index(cls: AtlasClass, key: str) -> str:
+    return f"ux_{cls.table}__{key}"
+
+
+def _sync_unique(conn, cls: AtlasClass, attr: Attribute) -> None:
+    name = q(_unique_index(cls, attr.key))
+    if attr.unique:
+        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {q(cls.table)} ({q(attr.key)})")
+    else:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+
+
+def _sync_cardinality(conn, rel: Relationship) -> None:
+    name = q(f"ux_{rel.link_table}__source")
+    if rel.cardinality == "one":
+        conn.execute(f'CREATE UNIQUE INDEX IF NOT EXISTS {name} ON {q(rel.link_table)} ("source_id")')
+    else:
+        conn.execute(f"DROP INDEX IF EXISTS {name}")
+
+
+def _create_link(conn, rel: Relationship) -> None:
+    conn.execute(
+        f'CREATE TABLE {q(rel.link_table)} ('
+        f'"source_id" INTEGER NOT NULL REFERENCES {q(rel.cls.table)}("_id") ON DELETE CASCADE, '
+        f'"target_id" INTEGER NOT NULL REFERENCES {q(rel.target.table)}("_id") ON DELETE CASCADE, '
+        f'PRIMARY KEY ("source_id", "target_id"))')
+    conn.execute(f'CREATE INDEX {q(f"ix_{rel.link_table}__target")} ON {q(rel.link_table)} ("target_id")')
+    _sync_cardinality(conn, rel)
+
+
+def _insert_members(conn, cls: AtlasClass) -> None:
+    for position, a in enumerate(cls.attributes):
+        conn.execute(
+            "INSERT INTO atlas_attribute (class_id, key, label, type, position, required, is_unique,"
+            " is_title, show, options, lookup) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (cls.id, a.key, a.label, a.type, position, int(a.required), int(a.unique), int(a.title),
+             int(a.show), json.dumps(a.options, ensure_ascii=False), a.lookup))
+    for position, r in enumerate(cls.relationships):
+        conn.execute(
+            "INSERT INTO atlas_relationship (class_id, key, label, target_class_id, cardinality,"
+            " position, required, show, reverse_label) VALUES (?,?,?,?,?,?,?,?,?)",
+            (cls.id, r.key, r.label, r.target.id, r.cardinality, position, int(r.required),
+             int(r.show), r.reverse_label))
+
+
+def _count(conn, sql: str, args=()) -> int:
+    return conn.execute(sql, args).fetchone()[0]
+
+
+def create_class(conn, schema: Schema, cls: AtlasClass, user: str) -> None:
+    if cls.key in schema.classes:
+        raise AtlasError(409, f"A class with the key '{cls.key}' already exists.")
+    _validate(Schema([*schema.classes.values(), cls]))
+    now = utc_now()
+    with transaction(conn):
+        cls.id = conn.execute(
+            "INSERT INTO atlas_class (key, label, path, description, roles, created_at, created_by,"
+            " updated_at, updated_by) VALUES (?,?,?,?,?,?,?,?,?)",
+            (cls.key, cls.label, cls.path, cls.description, json.dumps(cls.roles),
+             now, user, now, user)).lastrowid
+        _insert_members(conn, cls)
+        columns = [*_SYSTEM_COLUMNS, *(q(a.key) for a in cls.stored_attributes)]
+        conn.execute(f"CREATE TABLE {q(cls.table)} ({', '.join(columns)})")
+        for attr in cls.stored_attributes:
+            _sync_unique(conn, cls, attr)
+        for rel in cls.relationships:
+            _create_link(conn, rel)
+
+
+def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: bool = False) -> None:
+    """Replace a class definition, converting data where needed.
+
+    Changes that delete data (removing an attribute or relationship that holds
+    values, or a type change some values don't survive) are refused with
+    requires_force=True and a list of warnings unless force is set.
+    """
+    old = schema.get(cls.key)
+    cls.id = old.id
+    _validate(Schema([c for c in schema.classes.values() if c is not old] + [cls]))
+
+    old_attrs = {a.key: a for a in old.attributes}
+    new_attrs = {a.key: a for a in cls.attributes}
+    old_rels = {r.key: r for r in old.relationships}
+    new_rels = {r.key: r for r in cls.relationships}
+    for key in old_rels.keys() & new_rels.keys():
+        if old_rels[key].target_key != new_rels[key].target_key:
+            raise AtlasError(400, f"The target of '{new_rels[key].label}' can't change. "
+                                  f"Remove the relationship and add a new one.")
+
+    table = q(old.table)
+    dropped = [k for k, a in old_attrs.items() if a.stored and (k not in new_attrs or not new_attrs[k].stored)]
+    added = [k for k, a in new_attrs.items() if a.stored and (k not in old_attrs or not old_attrs[k].stored)]
+    warnings, conversions = [], {}
+    for key in dropped:
+        n = _count(conn, f"SELECT COUNT(*) FROM {table} WHERE {q(key)} IS NOT NULL")
+        if n:
+            verb = "Removing" if key not in new_attrs else "Turning into a look-through"
+            warnings.append(f"{verb} '{old_attrs[key].label}' deletes its value in {n} object(s).")
+    for key, new in new_attrs.items():
+        before = old_attrs.get(key)
+        if not (new.stored and before is not None and before.stored):
+            continue
+        if new.type == before.type and (new.type != "choice" or set(new.options) >= set(before.options)):
+            continue
+        changes, lost = [], 0
+        for object_id, value in conn.execute(f'SELECT "_id", {q(key)} FROM {table} WHERE {q(key)} IS NOT NULL'):
+            try:
+                converted = coerce(new.type, value, new.options)
+            except ValueError:
+                converted, lost = None, lost + 1
+            if converted != value or type(converted) is not type(value):
+                changes.append((converted, object_id))
+        conversions[key] = changes
+        if lost:
+            warnings.append(f"Changing '{new.label}' to {new.type} clears {lost} value(s) that don't fit.")
+    for key, rel in old_rels.items():
+        if key not in new_rels:
+            n = _count(conn, f"SELECT COUNT(*) FROM {q(rel.link_table)}")
+            if n:
+                warnings.append(f"Removing '{rel.label}' deletes {n} link(s).")
+    if warnings and not force:
+        raise AtlasError(409, "This change deletes data. Send it again with force=true to apply it.",
+                         warnings=warnings, requires_force=True)
+
+    for key, new in new_attrs.items():           # unique needs distinct values (after conversion)
+        before = old_attrs.get(key)
+        if not (new.stored and new.unique and before is not None and before.stored):
+            continue
+        values = dict(conn.execute(f'SELECT "_id", {q(key)} FROM {table} WHERE {q(key)} IS NOT NULL').fetchall())
+        values.update({object_id: value for value, object_id in conversions.get(key, [])})
+        seen = set()
+        for value in values.values():
+            if value is None:
+                continue
+            if value in seen:
+                raise AtlasError(409, f"'{new.label}' can't be unique: the value '{value}' appears more than once.")
+            seen.add(value)
+    for key, new in new_rels.items():
+        before = old_rels.get(key)
+        if before is not None and before.cardinality == "many" and new.cardinality == "one":
+            row = conn.execute(f'SELECT "source_id", COUNT(*) FROM {q(before.link_table)} '
+                               f'GROUP BY "source_id" HAVING COUNT(*) > 1 LIMIT 1').fetchone()
+            if row:
+                raise AtlasError(409, f"'{new.label}' can't become 'one': {old.label} #{row[0]} "
+                                      f"links to {row[1]} objects.")
+
+    try:
+        with transaction(conn):
+            conn.execute(
+                "UPDATE atlas_class SET label = ?, path = ?, description = ?, roles = ?,"
+                " updated_at = ?, updated_by = ? WHERE id = ?",
+                (cls.label, cls.path, cls.description, json.dumps(cls.roles), utc_now(), user, old.id))
+            conn.execute("DELETE FROM atlas_attribute WHERE class_id = ?", (old.id,))
+            conn.execute("DELETE FROM atlas_relationship WHERE class_id = ?", (old.id,))
+            _insert_members(conn, cls)
+            for key in dropped:
+                conn.execute(f"DROP INDEX IF EXISTS {q(_unique_index(old, key))}")
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {q(key)}")
+            for key in added:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {q(key)}")
+            for key, changes in conversions.items():
+                conn.execute(f"DROP INDEX IF EXISTS {q(_unique_index(old, key))}")
+                conn.executemany(f'UPDATE {table} SET {q(key)} = ? WHERE "_id" = ?', changes)
+            for attr in cls.stored_attributes:
+                _sync_unique(conn, cls, attr)
+            for key, rel in old_rels.items():
+                if key not in new_rels:
+                    conn.execute(f"DROP TABLE IF EXISTS {q(rel.link_table)}")
+            for key, rel in new_rels.items():
+                if key in old_rels:
+                    _sync_cardinality(conn, rel)
+                else:
+                    _create_link(conn, rel)
+    except sqlite3.IntegrityError as exc:
+        raise AtlasError(409, f"The change conflicts with existing data ({exc}).") from None
+
+
+def delete_class(conn, schema: Schema, key: str, *, force: bool = False) -> None:
+    cls = schema.get(key)
+    incoming = [r for r in schema.incoming(cls) if r.cls is not cls]
+    if incoming:
+        names = ", ".join(f"{r.cls.label} › {r.label}" for r in incoming)
+        raise AtlasError(409, f"Other classes link to {cls.label} ({names}). Remove those relationships first.")
+    n = _count(conn, f"SELECT COUNT(*) FROM {q(cls.table)}")
+    if n and not force:
+        raise AtlasError(409, f"Deleting {cls.label} deletes its {n} object(s). "
+                              f"Send it again with force=true to apply it.",
+                         warnings=[f"{cls.label} holds {n} object(s)."], requires_force=True)
+    with transaction(conn):
+        for rel in cls.relationships:
+            conn.execute(f"DROP TABLE IF EXISTS {q(rel.link_table)}")
+        conn.execute(f"DROP TABLE IF EXISTS {q(cls.table)}")
+        conn.execute("DELETE FROM atlas_class WHERE id = ?", (cls.id,))
+
+
+# --------------------------------------------------------------------------- #
+# API form
+# --------------------------------------------------------------------------- #
+def attribute_to_api(attr: Attribute, schema: Schema) -> dict:
+    out = {"key": attr.key, "label": attr.label, "type": attr.type, "required": attr.required,
+           "unique": attr.unique, "title": attr.title, "show": attr.show}
+    if attr.type == "choice":
+        out["options"] = list(attr.options)
+    if attr.type == "lookthrough":
+        out["lookup"] = attr.lookup
+        try:
+            rels, final = schema.resolve(attr)
+            out["value_type"] = final.type
+            out["many"] = any(r.cardinality == "many" for r in rels)
+            if final.type == "choice":
+                out["options"] = list(final.options)
+        except AtlasError:
+            out["value_type"], out["many"] = "string", False
+    return out
+
+
+def class_to_api(cls: AtlasClass, schema: Schema, *, admin: bool) -> dict:
+    out = {
+        "key": cls.key,
+        "label": cls.label,
+        "path": cls.path,
+        "description": cls.description,
+        "attributes": [attribute_to_api(a, schema) for a in cls.attributes],
+        "relationships": [{
+            "key": r.key, "label": r.label, "target": r.target_key,
+            "target_label": r.target.label if r.target else r.target_key,
+            "cardinality": r.cardinality, "required": r.required, "show": r.show,
+            "reverse_label": r.reverse_label,
+        } for r in cls.relationships],
+        "incoming": [{
+            "class": r.cls.key, "class_label": r.cls.label, "relationship": r.key,
+            "label": r.reverse_label or f"{r.cls.label} › {r.label}",
+        } for r in schema.incoming(cls)],
+        "created_at": cls.created_at, "created_by": cls.created_by,
+        "updated_at": cls.updated_at, "updated_by": cls.updated_by,
+    }
+    if admin:
+        out["roles"] = list(cls.roles)
+    return out
