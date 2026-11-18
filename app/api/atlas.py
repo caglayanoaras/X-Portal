@@ -15,30 +15,49 @@ session cookie, or `Authorization: Bearer <token>` from POST /auth/token.
     GET    /atlas/api/classes/{class}/objects/{id}       one object
     PATCH  /atlas/api/classes/{class}/objects/{id}       change some fields
     DELETE /atlas/api/classes/{class}/objects/{id}       delete it
+    PUT    /atlas/api/classes/{class}/objects/{id}/files/{attribute}   upload an image or file
+    GET    /atlas/api/classes/{class}/objects/{id}/files/{attribute}   get it [?view=thumb|preview][&download=true]
+    DELETE /atlas/api/classes/{class}/objects/{id}/files/{attribute}   remove it
 
 Admins are Data Admins and Superadmins. The rules for everyone else are in
 app/atlas/permissions.py.
 """
+import os
 from typing import Annotated
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile, status
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
 from app.atlas import db as atlas_db
+from app.atlas import files
 from app.atlas.errors import AtlasError
 from app.atlas.objects import (PAGE_SIZE, PAGE_SIZE_MAX, class_visible, create_object, delete_object,
-                               get_object, list_objects, update_object)
+                               get_file, get_object, list_objects, set_file, update_object, upload_attribute)
 from app.atlas.permissions import can_create, is_atlas_admin, viewer_for
 from app.atlas.schema import (RESERVED_KEYS, class_to_api, create_class, delete_class, load_schema,
                               parse_definition, update_class)
+from app.core.config import settings
 from app.core.database import get_session
 from app.core.utils import flash, get_flashed_messages, redirect_to_route
 from app.dependencies.auth import get_current_active_user
 from app.models import User, UserRole
 
 templates = Jinja2Templates(directory="app/templates")
+
+
+def asset_version(path: str) -> str:
+    """A version for a file under app/static (its modification time). The pages add it
+    to their script and style URLs (?v=...), so a changed file gets a new URL and no
+    browser can pair a new page with an old cached copy."""
+    try:
+        return str(int(os.path.getmtime(os.path.join("app", "static", path))))
+    except OSError:
+        return "0"
+
+
+templates.env.globals["asset_version"] = asset_version
 
 ActiveUserDep = Annotated[User, Depends(get_current_active_user)]
 SessionDep = Annotated[Session, Depends(get_session)]
@@ -88,6 +107,9 @@ def atlas_index(request: Request, current_user: ActiveUserDep):
             "user": current_user,
             "is_atlas_admin": is_atlas_admin(current_user),
             "flash_messages": get_flashed_messages(request),
+            "max_file_mb": settings.ATLAS_MAX_FILE_MB,
+            "image_accept": files.IMAGE_ACCEPT,
+            "file_accept": files.DOCUMENT_ACCEPT,
         },
     )
 
@@ -122,13 +144,14 @@ def api_classes(current_user: ActiveUserDep):
     with atlas_db.connect() as conn:
         schema = load_schema(conn)
         return [{"key": c.key, "label": c.label, "path": c.path, "description": c.description,
-                 "permissions": {"create": can_create(viewer, c)}}
+                 "color": c.color, "icon": c.icon, "permissions": {"create": can_create(viewer, c)}}
                 for c in schema.classes.values() if class_visible(conn, viewer, c)]
 
 
 @atlas_router.post("/api/classes", name="atlas_api_create_class", status_code=status.HTTP_201_CREATED)
 def api_create_class(current_user: AdminDep, db: SessionDep, payload: dict = Body(...)):
-    """Create a class. Body: key, label, path, description, roles, attributes, relationships."""
+    """Create a class. Body: key, label, path, description, color ("#21358b"), icon ("fa-flask"),
+    roles, attributes, relationships."""
     cls = parse_definition(payload)
     _check_class_roles(cls.roles, db)
     with atlas_db.connect() as conn:
@@ -191,18 +214,21 @@ def api_objects(
     page_size: int = Query(PAGE_SIZE, ge=1, le=PAGE_SIZE_MAX),
     expand: str | None = Query(None, description="Relationships to return as {_id, _title}: '*' or a comma list."),
     fields: str | None = Query(None, description="Only these fields (comma list); _id is always included."),
+    incoming_counts: bool = Query(False, description="Add _incoming_counts: per 'class.relationship' that "
+                                                     "points here, how many objects you can read link to each one."),
 ):
     """List objects. Any other query parameter is a filter: `field=value` or
     `field__op=value` with op in eq, ne, gt, gte, lt, lte, contains, startswith,
     in (comma list), isnull (true/false), on (a date). Examples:
-    `result=fail`, `qty__gte=5`, `retests=9`, `_created_at__gte=2026-11-01`."""
+    `result=fail`, `qty__gte=5`, `retests=9`, `_created_at__gte=2026-11-01`.
+    The objects linking to object 9 through batches.retests: GET /classes/batches/objects?retests=9."""
     viewer = viewer_for(current_user)
     filters = [(k, v) for k, v in request.query_params.multi_items() if k not in RESERVED_KEYS]
     with atlas_db.connect() as conn:
         schema = load_schema(conn)
         cls = schema.get(class_key)
         return list_objects(conn, schema, cls, viewer, filters, text=q, sort=sort, page=page,
-                            page_size=page_size, expand=expand, fields=fields)
+                            page_size=page_size, expand=expand, fields=fields, incoming_counts=incoming_counts)
 
 
 @atlas_router.post("/api/classes/{class_key}/objects", name="atlas_api_create_object",
@@ -248,10 +274,65 @@ def api_update_object(class_key: str, object_id: int, current_user: ActiveUserDe
 @atlas_router.delete("/api/classes/{class_key}/objects/{object_id}", name="atlas_api_delete_object",
                      status_code=status.HTTP_204_NO_CONTENT)
 def api_delete_object(class_key: str, object_id: int, current_user: ActiveUserDep):
-    """Delete an object; its links go with it."""
+    """Delete an object; its links and uploads go with it."""
     viewer = viewer_for(current_user)
     with atlas_db.connect() as conn:
         schema = load_schema(conn)
         delete_object(conn, schema, schema.get(class_key), viewer, object_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+# endregion
+
+
+# region Files API
+@atlas_router.put("/api/classes/{class_key}/objects/{object_id}/files/{attr_key}", name="atlas_api_put_file")
+def api_put_file(class_key: str, object_id: int, attr_key: str, current_user: ActiveUserDep,
+                 file: UploadFile = File(..., description="The image or file (multipart form field 'file')."),
+                 version: int | None = Form(None, alias="_version",
+                                            description="Fail with 409 if the object changed since this version.")):
+    """Upload an image or file into an attribute, replacing what was there.
+    Images: PNG, JPEG, GIF, WebP, TIFF or BMP. Files: PDF, Office, OpenDocument or CSV.
+    Answers with the object, so you get its new _version."""
+    limit = settings.ATLAS_MAX_FILE_MB * 1024 * 1024
+    data = file.file.read(limit + 1)
+    if len(data) > limit:
+        raise AtlasError(413, f"'{files.clean_name(file.filename)}' is larger than {settings.ATLAS_MAX_FILE_MB} MB.")
+    viewer = viewer_for(current_user)
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        cls = schema.get(class_key)
+        attr = upload_attribute(cls, attr_key)
+        set_file(conn, cls, viewer, object_id, attr_key, files.prepare(attr.type, file.filename, data), version)
+        return get_object(conn, schema, cls, viewer, object_id)
+
+
+@atlas_router.delete("/api/classes/{class_key}/objects/{object_id}/files/{attr_key}", name="atlas_api_delete_file")
+def api_delete_file(class_key: str, object_id: int, attr_key: str, current_user: ActiveUserDep,
+                    version: int | None = Query(None, alias="_version",
+                                                description="Fail with 409 if the object changed since this version.")):
+    """Remove the image or file in an attribute. Answers with the object."""
+    viewer = viewer_for(current_user)
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        cls = schema.get(class_key)
+        set_file(conn, cls, viewer, object_id, attr_key, None, version)
+        return get_object(conn, schema, cls, viewer, object_id)
+
+
+@atlas_router.get("/api/classes/{class_key}/objects/{object_id}/files/{attr_key}", name="atlas_api_file")
+def api_file(class_key: str, object_id: int, attr_key: str, request: Request, current_user: ActiveUserDep,
+             view: str = Query("original", description="original, preview (what a browser can show) or thumb."),
+             download: bool = Query(False, description="Save it instead of opening it in the browser.")):
+    """The image or file in an attribute. Images and PDFs open in the browser unless
+    download=true; Office files always download."""
+    viewer = viewer_for(current_user)
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        stored = get_file(conn, schema.get(class_key), viewer, object_id, attr_key, view)
+    etag = f'"{stored["sha256"][:32]}-{view}"'
+    inline = not download and (stored["type"].startswith("image/") or stored["type"] in files.INLINE_TYPES)
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache", "X-Content-Type-Options": "nosniff",
+               "Content-Disposition": files.content_disposition(stored["name"], inline)}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(content=stored["body"], media_type=stored["type"], headers=headers)
 # endregion

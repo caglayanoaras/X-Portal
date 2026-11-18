@@ -1,7 +1,8 @@
 """Connections to atlas.db, the SQLite file Atlas keeps apart from the portal DB.
 
 The file is created on start if it is missing, so deleting it (with the server
-stopped) resets Atlas and leaves the rest of the portal untouched.
+stopped) resets Atlas and leaves the rest of the portal untouched. Uploaded
+images and files live in it too (atlas_file), so it is the one file to back up.
 """
 import os
 import sqlite3
@@ -9,7 +10,7 @@ from contextlib import contextmanager
 
 from app.core.config import settings
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _FOLD = str.maketrans("İIıŞşĞğÜüÖöÇç", "iiissgguuoocc")
 
@@ -65,6 +66,8 @@ CREATE TABLE IF NOT EXISTS atlas_class (
     label       TEXT NOT NULL,
     path        TEXT NOT NULL DEFAULT '',
     description TEXT NOT NULL DEFAULT '',
+    color       TEXT NOT NULL DEFAULT '',
+    icon        TEXT NOT NULL DEFAULT '',
     roles       TEXT NOT NULL DEFAULT '[]',
     created_at  TEXT NOT NULL,
     created_by  TEXT NOT NULL,
@@ -99,12 +102,38 @@ CREATE TABLE IF NOT EXISTS atlas_relationship (
     reverse_label   TEXT NOT NULL DEFAULT '',
     UNIQUE (class_id, key)
 );
+CREATE TABLE IF NOT EXISTS atlas_file (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL,
+    type       TEXT NOT NULL,
+    size       INTEGER NOT NULL,
+    width      INTEGER,
+    height     INTEGER,
+    sha256     TEXT NOT NULL,
+    data       BLOB NOT NULL,
+    preview    BLOB,
+    thumb      BLOB,
+    created_at TEXT NOT NULL,
+    created_by TEXT NOT NULL
+);
 """
 
 
+# Columns added after the first version; an older atlas.db gets them on start.
+_ADDED_COLUMNS = {
+    "atlas_class": {"color": "TEXT NOT NULL DEFAULT ''", "icon": "TEXT NOT NULL DEFAULT ''"},
+}
+
+
 def init_db() -> None:
-    """Create atlas.db and its definition tables if they don't exist yet."""
+    """Create atlas.db and its definition tables if they don't exist yet, and
+    add any columns an older file is missing."""
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(_META_TABLES)
+        for table, columns in _ADDED_COLUMNS.items():
+            have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for name, declaration in columns.items():
+                if name not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
         conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

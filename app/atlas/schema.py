@@ -28,12 +28,20 @@ from app.atlas.errors import AtlasError
 from app.atlas.values import coerce, role_ids
 
 ATTRIBUTE_TYPES = ("string", "text", "int", "float", "boolean", "date", "datetime",
-                   "choice", "lookthrough")
+                   "choice", "image", "file", "lookthrough")
+# How the class builder names each type, for messages people read.
+TYPE_NAMES = {"string": "text", "text": "long text", "int": "integer", "float": "float",
+              "boolean": "yes / no", "date": "date", "datetime": "date and time", "choice": "choice",
+              "image": "image", "file": "file", "lookthrough": "look-through"}
+# Types whose column holds the id of an uploaded file (atlas_file); see files.py.
+FILE_TYPES = frozenset({"image", "file"})
 CARDINALITIES = ("one", "many")
+COLOR_PATTERN = re.compile(r"#[0-9a-f]{6}")                  # "#21358b"
+ICON_PATTERN = re.compile(r"fa-[a-z0-9]+(?:-[a-z0-9]+)*")    # a Font Awesome name: "fa-flask"
 KEY_PATTERN = re.compile(r"[a-z](?:_?[a-z0-9])*")   # no leading, trailing or double "_"
 KEY_MAX = 40
 # Query-string words of the objects API, so no field may use them as its key.
-RESERVED_KEYS = frozenset({"q", "sort", "page", "page_size", "expand", "fields"})
+RESERVED_KEYS = frozenset({"q", "sort", "page", "page_size", "expand", "fields", "incoming_counts"})
 
 # System fields every object has, with the type used to filter and sort them.
 # Timestamps are UTC ISO 8601 ("2026-11-06T09:12:00Z").
@@ -110,6 +118,8 @@ class AtlasClass:
     label: str
     path: str = ""
     description: str = ""
+    color: str = ""              # "#rrggbb"; "" shows the default grey
+    icon: str = ""               # Font Awesome name, "fa-flask"; "" shows the default icon
     roles: list = field(default_factory=list)
     attributes: list = field(default_factory=list)
     relationships: list = field(default_factory=list)
@@ -184,7 +194,7 @@ def load_schema(conn) -> Schema:
     for row in conn.execute("SELECT * FROM atlas_class ORDER BY path, label"):
         classes[row["id"]] = AtlasClass(
             key=row["key"], label=row["label"], path=row["path"], description=row["description"],
-            roles=json.loads(row["roles"]), id=row["id"],
+            color=row["color"], icon=row["icon"], roles=json.loads(row["roles"]), id=row["id"],
             created_at=row["created_at"], created_by=row["created_by"],
             updated_at=row["updated_at"], updated_by=row["updated_by"])
     for row in conn.execute("SELECT * FROM atlas_attribute ORDER BY class_id, position, id"):
@@ -204,12 +214,13 @@ def load_schema(conn) -> Schema:
 # --------------------------------------------------------------------------- #
 # Parsing a definition sent to the API
 # --------------------------------------------------------------------------- #
-_CLASS_FIELDS = {"key", "label", "path", "description", "roles", "attributes", "relationships"}
+_CLASS_FIELDS = {"key", "label", "path", "description", "color", "icon", "roles", "attributes",
+                 "relationships"}
 _ATTRIBUTE_FIELDS = {"key", "label", "type", "required", "unique", "title", "show", "options", "lookup"}
 _RELATIONSHIP_FIELDS = {"key", "label", "target", "cardinality", "required", "show", "reverse_label"}
 # Read-only fields a GET returns, so PUTting that same JSON back just works.
 _READ_ONLY_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", "permissions",
-                     "incoming", "value_type", "many", "target_label"}
+                     "incoming", "value_type", "many", "target_label", "target_color", "target_icon"}
 
 
 def check_key(value, what: str) -> str:
@@ -259,6 +270,20 @@ def _path(value) -> str:
     return "/".join(part.strip() for part in text.replace("\\", "/").split("/") if part.strip())
 
 
+def _color(value) -> str:
+    text = _text(value, "The color").lower()
+    if text and not COLOR_PATTERN.fullmatch(text):
+        raise AtlasError(400, "The color must be a hex color such as #21358b.")
+    return text
+
+
+def _icon(value) -> str:
+    text = _text(value, "The icon")
+    if text and (len(text) > 40 or not ICON_PATTERN.fullmatch(text)):
+        raise AtlasError(400, "The icon must be a Font Awesome name such as fa-flask.")
+    return text
+
+
 def _parse_attribute(item, n: int) -> Attribute:
     if not isinstance(item, dict):
         raise AtlasError(400, f"Attribute {n} must be an object.")
@@ -293,6 +318,8 @@ def _parse_attribute(item, n: int) -> Attribute:
         attr.lookup = lookup.strip()
         if attr.required or attr.unique:
             raise AtlasError(400, f"The look-through '{label}' can't be required or unique.")
+    if atype in FILE_TYPES and (attr.unique or attr.title):
+        raise AtlasError(400, f"The {TYPE_NAMES[atype]} '{label}' can't be unique or part of the title.")
     return attr
 
 
@@ -333,6 +360,8 @@ def parse_definition(payload, *, key: str | None = None) -> AtlasClass:
         label=_text(payload.get("label"), "The class label", required=True, limit=100),
         path=_path(payload.get("path")),
         description=_text(payload.get("description"), "The description", limit=2000),
+        color=_color(payload.get("color")),
+        icon=_icon(payload.get("icon")),
         roles=roles)
     used = set()
 
@@ -363,8 +392,9 @@ def _validate(schema: Schema) -> None:
                 raise AtlasError(400, f"'{cls.label} › {rel.label}' points at '{rel.target_key}', "
                                       f"which is not a class.")
         for attr in cls.attributes:
-            if not attr.stored:
-                schema.resolve(attr)
+            if not attr.stored and schema.resolve(attr)[1].type in FILE_TYPES:
+                raise AtlasError(400, f"The look-through '{cls.label} › {attr.label}' can't show an image or file; "
+                                      f"open the linked object to see it.")
 
 
 # --------------------------------------------------------------------------- #
@@ -426,9 +456,9 @@ def create_class(conn, schema: Schema, cls: AtlasClass, user: str) -> None:
     now = utc_now()
     with transaction(conn):
         cls.id = conn.execute(
-            "INSERT INTO atlas_class (key, label, path, description, roles, created_at, created_by,"
-            " updated_at, updated_by) VALUES (?,?,?,?,?,?,?,?,?)",
-            (cls.key, cls.label, cls.path, cls.description, json.dumps(cls.roles),
+            "INSERT INTO atlas_class (key, label, path, description, color, icon, roles, created_at,"
+            " created_by, updated_at, updated_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (cls.key, cls.label, cls.path, cls.description, cls.color, cls.icon, json.dumps(cls.roles),
              now, user, now, user)).lastrowid
         _insert_members(conn, cls)
         columns = [*_SYSTEM_COLUMNS, *(q(a.key) for a in cls.stored_attributes)]
@@ -448,7 +478,8 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
     """
     old = schema.get(cls.key)
     cls.id = old.id
-    _validate(Schema([c for c in schema.classes.values() if c is not old] + [cls]))
+    new_schema = Schema([c for c in schema.classes.values() if c is not old] + [cls])
+    _validate(new_schema)
 
     old_attrs = {a.key: a for a in old.attributes}
     new_attrs = {a.key: a for a in cls.attributes}
@@ -474,6 +505,13 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
             continue
         if new.type == before.type and (new.type != "choice" or set(new.options) >= set(before.options)):
             continue
+        if new.type in FILE_TYPES or before.type in FILE_TYPES:     # uploads don't convert: they go
+            ids = [row[0] for row in conn.execute(f'SELECT "_id" FROM {table} WHERE {q(key)} IS NOT NULL')]
+            conversions[key] = [(None, object_id) for object_id in ids]
+            if ids:
+                warnings.append(f"Changing '{new.label}' to {TYPE_NAMES.get(new.type, new.type)} "
+                                f"deletes its value in {len(ids)} object(s).")
+            continue
         changes, lost = [], 0
         for object_id, value in conn.execute(f'SELECT "_id", {q(key)} FROM {table} WHERE {q(key)} IS NOT NULL'):
             try:
@@ -484,7 +522,8 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
                 changes.append((converted, object_id))
         conversions[key] = changes
         if lost:
-            warnings.append(f"Changing '{new.label}' to {new.type} clears {lost} value(s) that don't fit.")
+            warnings.append(f"Changing '{new.label}' to {TYPE_NAMES.get(new.type, new.type)} "
+                            f"clears {lost} value(s) that don't fit.")
     for key, rel in old_rels.items():
         if key not in new_rels:
             n = _count(conn, f"SELECT COUNT(*) FROM {q(rel.link_table)}")
@@ -519,9 +558,10 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
     try:
         with transaction(conn):
             conn.execute(
-                "UPDATE atlas_class SET label = ?, path = ?, description = ?, roles = ?,"
+                "UPDATE atlas_class SET label = ?, path = ?, description = ?, color = ?, icon = ?, roles = ?,"
                 " updated_at = ?, updated_by = ? WHERE id = ?",
-                (cls.label, cls.path, cls.description, json.dumps(cls.roles), utc_now(), user, old.id))
+                (cls.label, cls.path, cls.description, cls.color, cls.icon, json.dumps(cls.roles),
+                 utc_now(), user, old.id))
             conn.execute("DELETE FROM atlas_attribute WHERE class_id = ?", (old.id,))
             conn.execute("DELETE FROM atlas_relationship WHERE class_id = ?", (old.id,))
             _insert_members(conn, cls)
@@ -543,6 +583,7 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
                     _sync_cardinality(conn, rel)
                 else:
                     _create_link(conn, rel)
+            sweep_files(conn, new_schema)
     except sqlite3.IntegrityError as exc:
         raise AtlasError(409, f"The change conflicts with existing data ({exc}).") from None
 
@@ -563,6 +604,17 @@ def delete_class(conn, schema: Schema, key: str, *, force: bool = False) -> None
             conn.execute(f"DROP TABLE IF EXISTS {q(rel.link_table)}")
         conn.execute(f"DROP TABLE IF EXISTS {q(cls.table)}")
         conn.execute("DELETE FROM atlas_class WHERE id = ?", (cls.id,))
+        sweep_files(conn, Schema([c for c in schema.classes.values() if c is not cls]))
+
+
+def sweep_files(conn, schema: Schema) -> None:
+    """Delete uploads that no object's image or file column refers to any more."""
+    refs = [f"SELECT {q(a.key)} FROM {q(c.table)} WHERE {q(a.key)} IS NOT NULL"
+            for c in schema.classes.values() for a in c.stored_attributes if a.type in FILE_TYPES]
+    if refs:
+        conn.execute(f"DELETE FROM atlas_file WHERE id NOT IN ({' UNION ALL '.join(refs)})")
+    else:
+        conn.execute("DELETE FROM atlas_file")
 
 
 # --------------------------------------------------------------------------- #
@@ -592,16 +644,21 @@ def class_to_api(cls: AtlasClass, schema: Schema, *, admin: bool) -> dict:
         "label": cls.label,
         "path": cls.path,
         "description": cls.description,
+        "color": cls.color,
+        "icon": cls.icon,
         "attributes": [attribute_to_api(a, schema) for a in cls.attributes],
         "relationships": [{
             "key": r.key, "label": r.label, "target": r.target_key,
             "target_label": r.target.label if r.target else r.target_key,
+            "target_color": r.target.color if r.target else "",
+            "target_icon": r.target.icon if r.target else "",
             "cardinality": r.cardinality, "required": r.required, "show": r.show,
             "reverse_label": r.reverse_label,
         } for r in cls.relationships],
         "incoming": [{
             "class": r.cls.key, "class_label": r.cls.label, "relationship": r.key,
             "label": r.reverse_label or f"{r.cls.label} › {r.label}",
+            "show": r.show, "color": r.cls.color, "icon": r.cls.icon,
         } for r in schema.incoming(cls)],
         "created_at": cls.created_at, "created_by": cls.created_by,
         "updated_at": cls.updated_at, "updated_by": cls.updated_by,

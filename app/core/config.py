@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     # Atlas keeps its data in its own SQLite file (created on start if missing).
     # Deleting it resets Atlas without touching the portal database.
     ATLAS_DB_PATH: str = "atlas.db"
+    ATLAS_MAX_FILE_MB: int = 25          # largest image or file one upload may be
     ENV: str = "development"
     SECRET_KEY: str = "development-secret-key"
     ALGORITHM: str = "HS256"

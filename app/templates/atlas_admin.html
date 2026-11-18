@@ -3,7 +3,7 @@
 {% block title %}Atlas · Class builder{% endblock %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', path='/css/atlas.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='/css/atlas.css') }}?v={{ asset_version('css/atlas.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -25,38 +25,76 @@
   <main class="atlas-main">
     <div id="admin-message" class="text-muted text-center py-5">Loading…</div>
 
-    <section id="admin-editor" class="d-none">
-      <div class="d-flex justify-content-between align-items-center mb-3">
-        <h3 class="mb-0" id="admin-title"></h3>
-        <a href="#" class="btn btn-sm btn-outline-secondary d-none" id="admin-open">
+    <section id="admin-editor" class="atlas-editor d-none">
+      <header class="atlas-head">
+        <div>
+          <p class="atlas-kicker" id="admin-kicker"></p>
+          <h2 class="atlas-title"><span id="admin-title-icon"></span><span id="admin-title"></span></h2>
+          <p class="atlas-sub" id="admin-sub"></p>
+        </div>
+        <a href="#" class="btn btn-sm btn-outline-secondary text-nowrap d-none" id="admin-open">
           <i class="fas fa-table me-1"></i>Open in Atlas
         </a>
-      </div>
+      </header>
 
       <div id="admin-error" class="alert alert-danger py-2 d-none" role="alert"></div>
       <div id="admin-saved" class="alert alert-success py-2 d-none" role="status"></div>
 
       <form id="admin-form" autocomplete="off">
-        <div class="row g-3">
-          <div class="col-md-5">
-            <label class="form-label" for="cls-label">Label <span class="text-danger">*</span></label>
-            <input class="form-control" id="cls-label" maxlength="100">
+        <section class="atlas-card">
+          <div class="atlas-card-head"><h3 class="atlas-card-title">Details</h3></div>
+          <div class="atlas-card-body">
+            <div class="row g-3">
+              <div class="col-md-5">
+                <label class="form-label" for="cls-label">Label <span class="text-danger">*</span></label>
+                <input class="form-control" id="cls-label" maxlength="100">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label" for="cls-key">Key</label>
+                <input class="form-control font-monospace" id="cls-key" maxlength="40">
+                <div class="form-text">Used by the API. Can't change once saved.</div>
+              </div>
+              <div class="col-md-4">
+                <label class="form-label" for="cls-path">Folder</label>
+                <input class="form-control" id="cls-path" list="admin-paths" placeholder="e.g. Depo/Hammadde">
+                <datalist id="admin-paths"></datalist>
+              </div>
+              <div class="col-12">
+                <label class="form-label" for="cls-description">Description</label>
+                <textarea class="form-control" id="cls-description" rows="2" maxlength="2000"></textarea>
+              </div>
+              <div class="col-md-7">
+                <span class="form-label d-block">Color</span>
+                <div class="atlas-swatches" id="cls-colors" role="group" aria-label="Color"></div>
+              </div>
+              <div class="col-md-5">
+                <span class="form-label d-block">Icon</span>
+                <div class="dropdown">
+                  <button type="button" class="btn btn-outline-secondary dropdown-toggle atlas-icon-button"
+                          id="cls-icon-button" data-bs-toggle="dropdown" data-bs-auto-close="outside"
+                          aria-expanded="false">
+                    <span id="cls-icon-preview"></span><span id="cls-icon-name"></span>
+                  </button>
+                  <div class="dropdown-menu atlas-icon-menu" aria-labelledby="cls-icon-button">
+                    <input type="search" class="form-control form-control-sm mb-2" id="cls-icon-search"
+                           placeholder="Search icons" aria-label="Search icons">
+                    <div class="atlas-icon-grid" id="cls-icon-grid"></div>
+                    <div class="text-muted small px-1 py-2 d-none" id="cls-icon-none">No icons match.</div>
+                    <div class="border-top mt-2 pt-2">
+                      <button type="button" class="btn btn-sm btn-link text-decoration-none p-0" id="cls-icon-default">
+                        Use the default icon
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
-          <div class="col-md-3">
-            <label class="form-label" for="cls-key">Key</label>
-            <input class="form-control font-monospace" id="cls-key" maxlength="40">
-            <div class="form-text">Used by the API. Can't change once saved.</div>
-          </div>
-          <div class="col-md-4">
-            <label class="form-label" for="cls-path">Folder</label>
-            <input class="form-control" id="cls-path" list="admin-paths" placeholder="e.g. Depo/Hammadde">
-            <datalist id="admin-paths"></datalist>
-          </div>
-          <div class="col-12">
-            <label class="form-label" for="cls-description">Description</label>
-            <textarea class="form-control" id="cls-description" rows="2" maxlength="2000"></textarea>
-          </div>
-          <div class="col-12">
+        </section>
+
+        <section class="atlas-card">
+          <div class="atlas-card-head"><h3 class="atlas-card-title">Access</h3></div>
+          <div class="atlas-card-body">
             <label class="form-label" for="cls-roles">Roles</label>
             <select id="cls-roles" multiple placeholder="Everyone"></select>
             <div class="form-text">
@@ -64,61 +102,64 @@
               permissions allow. An object can add roles of its own; it can't take a class role away.
             </div>
           </div>
-        </div>
+        </section>
 
-        <div class="d-flex justify-content-between align-items-center mt-4 mb-2">
-          <h5 class="mb-0">Attributes</h5>
-          <button type="button" class="btn btn-sm btn-outline-primary" id="add-attr">
-            <i class="fas fa-plus me-1"></i>Add attribute
-          </button>
-        </div>
-        <div class="table-responsive">
-          <table class="table table-sm atlas-builder mb-1">
-            <thead>
-              <tr>
-                <th>Label</th><th>Key</th><th>Type</th><th>Options / look-through</th>
-                <th class="col-flag" title="A value is required">Req.</th>
-                <th class="col-flag" title="No two objects can have the same value">Unique</th>
-                <th class="col-flag" title="Part of the object's title, shown wherever other objects link to it">Title</th>
-                <th class="col-flag" title="A column in the grid">Show</th>
-                <th class="col-move"></th>
-              </tr>
-            </thead>
-            <tbody id="attr-rows"></tbody>
-          </table>
-        </div>
-        <div class="form-text mb-2" id="attr-empty">No attributes yet.</div>
+        <section class="atlas-card">
+          <div class="atlas-card-head">
+            <h3 class="atlas-card-title">Attributes<span class="atlas-count" id="attr-count"></span></h3>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="add-attr">
+              <i class="fas fa-plus me-1"></i>Add attribute
+            </button>
+          </div>
+          <div class="table-responsive" id="attr-table">
+            <table class="table table-sm atlas-builder">
+              <thead>
+                <tr>
+                  <th>Label</th><th>Key</th><th>Type</th><th>Options / look-through</th>
+                  <th class="col-flag" title="A value is required">Req.</th>
+                  <th class="col-flag" title="No two objects can have the same value">Unique</th>
+                  <th class="col-flag" title="Part of the object's title, shown wherever other objects link to it">Title</th>
+                  <th class="col-flag" title="A column in the grid">Show</th>
+                  <th class="col-move"></th>
+                </tr>
+              </thead>
+              <tbody id="attr-rows"></tbody>
+            </table>
+          </div>
+          <div class="atlas-card-empty" id="attr-empty">No attributes yet.</div>
+        </section>
 
-        <div class="d-flex justify-content-between align-items-center mt-4 mb-2">
-          <h5 class="mb-0">Relationships</h5>
-          <button type="button" class="btn btn-sm btn-outline-primary" id="add-rel">
-            <i class="fas fa-plus me-1"></i>Add relationship
-          </button>
-        </div>
-        <div class="table-responsive">
-          <table class="table table-sm atlas-builder mb-1">
-            <thead>
-              <tr>
-                <th>Label</th><th>Key</th><th>Target class</th><th>Links to</th>
-                <th title="How the link reads on the target's side, e.g. 'Retest of'">Reverse label</th>
-                <th class="col-flag" title="At least one link is required">Req.</th>
-                <th class="col-flag" title="A column in the grid">Show</th>
-                <th class="col-move"></th>
-              </tr>
-            </thead>
-            <tbody id="rel-rows"></tbody>
-          </table>
-        </div>
-        <div class="form-text mb-2" id="rel-empty">No relationships yet.</div>
+        <section class="atlas-card">
+          <div class="atlas-card-head">
+            <h3 class="atlas-card-title">Relationships<span class="atlas-count" id="rel-count"></span></h3>
+            <button type="button" class="btn btn-sm btn-outline-primary" id="add-rel">
+              <i class="fas fa-plus me-1"></i>Add relationship
+            </button>
+          </div>
+          <div class="table-responsive" id="rel-table">
+            <table class="table table-sm atlas-builder">
+              <thead>
+                <tr>
+                  <th>Label</th><th>Key</th><th>Target class</th><th>Links to</th>
+                  <th title="How the link reads on the target's side, e.g. 'Retest of'">Reverse label</th>
+                  <th class="col-flag" title="At least one link is required">Req.</th>
+                  <th class="col-flag" title="Buttons for this link in the grid rows of both classes (here and on the target's side); the column itself starts hidden">Show</th>
+                  <th class="col-move"></th>
+                </tr>
+              </thead>
+              <tbody id="rel-rows"></tbody>
+            </table>
+          </div>
+          <div class="atlas-card-empty" id="rel-empty">No relationships yet.</div>
+        </section>
       </form>
 
-      <div class="d-flex gap-2 border-top pt-3 mt-4">
+      <div class="atlas-actions">
         <button type="button" class="btn btn-primary" id="admin-save"><i class="fas fa-save me-1"></i>Save</button>
         <button type="button" class="btn btn-outline-danger ms-auto d-none" id="admin-delete">
           <i class="fas fa-trash me-1"></i>Delete class
         </button>
       </div>
-      <div class="atlas-meta mt-2" id="admin-meta"></div>
     </section>
   </main>
 </div>
@@ -144,5 +185,9 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="{{ url_for('static', path='js/apps/atlas-admin-app.js') }}"></script>
+{# Versioned URLs (?v=): a changed file gets a new URL, so no browser mixes old and new scripts.
+   The import map does the same for the shared module the page script imports. #}
+{% set common = url_for('static', path='js/apps/atlas-common.js') %}
+<script type="importmap">{"imports": {"{{ common }}": "{{ common }}?v={{ asset_version('js/apps/atlas-common.js') }}"}}</script>
+<script type="module" src="{{ url_for('static', path='js/apps/atlas-admin-app.js') }}?v={{ asset_version('js/apps/atlas-admin-app.js') }}"></script>
 {% endblock %}

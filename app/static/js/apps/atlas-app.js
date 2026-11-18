@@ -1,12 +1,17 @@
 // Atlas: browse a class's objects in a grid; view, add, edit and delete them.
 // The grid pages, sorts and filters on the server (AG Grid infinite row model),
 // and the form is built from the class definition. URLs: #class or #class/id.
-import { api, esc, fmtLocal, fmtStamp, fold, renderTree } from './atlas-common.js';
+import {
+  FILE_TYPES, api, classIcon, esc, fileIcon, fmtLocal, fmtSize, fmtStamp, fold, renderTree, upload,
+} from './atlas-common.js';
 
 const root = document.getElementById('atlas-app');
 const URLS = { classes: root.dataset.urlClasses, roles: root.dataset.urlRoles, admin: root.dataset.urlAdmin };
 const IS_ADMIN = root.dataset.isAdmin === 'true';
 const PAGE_SIZE = 100;
+const MAX_FILE_MB = Number(root.dataset.maxFileMb) || 25;
+const ACCEPT = { image: root.dataset.imageAccept || '', file: root.dataset.fileAccept || '' };
+const SHOWN_IMAGES = /^image\/(png|jpeg|gif|webp|bmp)$/;     // what a browser previews before upload (not TIFF)
 const $ = id => document.getElementById(id);
 
 const TEXT_FILTER = { filterOptions: ['contains', 'equals', 'notEqual', 'startsWith', 'blank', 'notBlank'], maxNumConditions: 1 };
@@ -46,6 +51,8 @@ class AtlasBrowser {
     this.search = '';
     this.editing = null;      // the object in the form; null for a new one
     this.selects = {};        // tom-select instances in the form
+    this.fileChanges = {};    // attribute key -> {file, url} to upload or {remove: true}, sent on Save
+    this.canEdit = false;     // may the form change the object
     this.pendingRoute = false;
     this.modal = bootstrap.Modal.getOrCreateInstance($('atlas-object-modal'));
     this.bind();
@@ -62,9 +69,21 @@ class AtlasBrowser {
     $('atlas-new').addEventListener('click', () => this.openForm(null));
     $('atlas-object-save').addEventListener('click', () => this.save());
     $('atlas-object-delete').addEventListener('click', () => { if (this.editing) this.remove(this.editing._id); });
+    // A linked object in the links list: close the list first, then open the object.
+    $('linksList').addEventListener('click', e => {
+      const link = e.target.closest('a.atlas-link-item');
+      if (!link) return;
+      e.preventDefault();
+      const modal = $('showLinksModal');
+      modal.addEventListener('hidden.bs.modal', () => { location.hash = link.getAttribute('href'); }, { once: true });
+      bootstrap.Modal.getOrCreateInstance(modal).hide();
+    });
+    this.bindFileFields();
+    $('atlas-file-modal').addEventListener('hidden.bs.modal', () => { $('atlas-file-body').innerHTML = ''; });
     $('atlas-object-modal').addEventListener('hidden.bs.modal', () => {
       for (const select of Object.values(this.selects)) select.destroy();
       this.selects = {};
+      this.dropFileChanges();
       this.editing = null;
       if (this.pendingRoute) {
         this.pendingRoute = false;
@@ -132,6 +151,7 @@ class AtlasBrowser {
     this.renderTree();
     $('atlas-message').classList.add('d-none');
     $('atlas-class').classList.remove('d-none');
+    $('atlas-class-icon').innerHTML = classIcon(this.cls.icon, this.cls.color);
     $('atlas-class-label').textContent = this.cls.label;
     $('atlas-class-description').textContent = this.cls.description || '';
     $('atlas-new').classList.toggle('d-none', !this.cls.permissions.create);
@@ -183,10 +203,11 @@ class AtlasBrowser {
                     filter: 'agNumberColumnFilter', filterParams: NUMBER_FILTER }];
     this.kinds._id = 'number';
     for (const a of c.attributes.filter(a => a.show)) cols.push(this.attributeColumn(a));
-    for (const r of c.relationships.filter(r => r.show)) {
+    // Relationship columns start hidden (the Columns panel shows them); the row buttons list the links.
+    for (const r of c.relationships) {
       this.kinds[r.key] = 'link';
-      cols.push({ field: r.key, headerName: r.label, filter: 'agTextColumnFilter', filterParams: LINK_FILTER,
-                  valueFormatter: p => this.linkText(p.value) });
+      cols.push({ field: r.key, headerName: r.label, hide: true, filter: 'agTextColumnFilter',
+                  filterParams: LINK_FILTER, valueFormatter: p => this.linkText(p.value) });
     }
     if (IS_ADMIN) {
       cols.push({ field: '_roles', headerName: 'Roles', sortable: false, filter: false,
@@ -200,14 +221,30 @@ class AtlasBrowser {
                   filterParams: stamp ? DATE_FILTER : TEXT_FILTER,
                   valueFormatter: stamp ? (p => fmtStamp(p.value)) : undefined });
     }
+    const width = 118 + 54 * (this.linkRelationships().length + this.incomingLinks().length);
     cols.push({ colId: '_actions', headerName: '', sortable: false, filter: false, resizable: false,
-                suppressHeaderMenuButton: true, pinned: 'right', width: 112, minWidth: 112, maxWidth: 112, flex: 0,
-                cellRenderer: p => this.actionButtons(p.data) });
+                suppressHeaderMenuButton: true, suppressColumnsToolPanel: true, pinned: 'right',
+                width, minWidth: width, maxWidth: width, flex: 0, cellRenderer: p => this.actionButtons(p.data) });
     return cols;
+  }
+
+  // Relationships that get a button in each row ("Show" in the class builder).
+  linkRelationships() {
+    return this.cls.relationships.filter(r => r.show);
+  }
+
+  // The reverse side: relationships of other classes (or this one) pointing here.
+  incomingLinks() {
+    return (this.cls.incoming || []).filter(r => r.show);
   }
 
   attributeColumn(a) {
     const type = a.type === 'lookthrough' ? a.value_type : a.type;
+    if (FILE_TYPES.includes(type)) {             // filters: by file name, or whether there is one
+      this.kinds[a.key] = 'text';
+      return { field: a.key, headerName: a.label, filter: 'agTextColumnFilter', filterParams: LINK_FILTER,
+               minWidth: type === 'image' ? 100 : 170, cellRenderer: p => this.fileCell(p.data, a) };
+    }
     const col = { field: a.key, headerName: a.label, valueFormatter: p => fmtValue(type, p.value) };
     if (type === 'int' || type === 'float') {
       Object.assign(col, { filter: 'agNumberColumnFilter', filterParams: NUMBER_FILTER, type: 'rightAligned' });
@@ -234,6 +271,53 @@ class AtlasBrowser {
     return col;
   }
 
+  // -- images and files -------------------------------------------------------
+  // The URL of an object's upload. v (the object's version) gives a changed file a new URL.
+  fileUrl(id, key, { view = 'original', download = false, v } = {}) {
+    const qs = new URLSearchParams();
+    if (view !== 'original') qs.set('view', view);
+    if (download) qs.set('download', 'true');
+    if (v != null) qs.set('v', v);
+    const query = qs.toString();
+    return `${this.objectsUrl()}/${id}/files/${encodeURIComponent(key)}${query ? `?${query}` : ''}`;
+  }
+
+  fileCell(data, a) {
+    const f = data && data[a.key];
+    if (!f) return '';
+    if (a.type === 'image') {
+      return `<button type="button" class="atlas-thumb" data-action="file" data-attr="${esc(a.key)}" title="${esc(f.name)}">
+        <img src="${esc(this.fileUrl(data._id, a.key, { view: 'thumb', v: data._version }))}" alt="" loading="lazy"></button>`;
+    }
+    const [icon, color] = fileIcon(f.name);
+    return `<button type="button" class="atlas-file-link" data-action="file" data-attr="${esc(a.key)}" title="${esc(f.name)}">
+      <i class="fas ${icon} fa-fw" style="color:${color}"></i><span>${esc(f.name)}</span></button>`;
+  }
+
+  // Open an image (or a PDF) in the viewer; other files show a card. Download saves the original.
+  showFile(data, a) {
+    const f = data && data[a.key];
+    if (!f) return;
+    const at = opts => this.fileUrl(data._id, a.key, { ...opts, v: data._version });
+    const isImage = a.type === 'image';
+    const isPdf = f.type === 'application/pdf';
+    const pdfShown = isPdf && navigator.pdfViewerEnabled !== false;   // a browser can have its PDF viewer off
+    const [icon, color] = fileIcon(f.name);
+    $('atlas-file-title').textContent = `${a.label} · ${data._title || `#${data._id}`}`;
+    $('atlas-file-body').innerHTML = isImage
+      ? `<img src="${esc(at({ view: 'preview' }))}" alt="${esc(f.name)}" class="atlas-file-image">`
+      : pdfShown
+        ? `<iframe src="${esc(at({}))}" class="atlas-file-pdf" title="${esc(f.name)}"></iframe>`
+        : `<div class="py-4"><i class="fas ${icon} fa-4x" style="color:${color}"></i>
+             <div class="mt-3">${esc(f.name)}</div></div>`;
+    $('atlas-file-meta').textContent = [f.name, fmtSize(f.size), f.width ? `${f.width} × ${f.height}` : '']
+      .filter(Boolean).join(' · ');
+    $('atlas-file-open').classList.toggle('d-none', !(isImage || isPdf));
+    $('atlas-file-open').href = at({ view: isImage ? 'preview' : 'original' });
+    $('atlas-file-download').href = at({ download: true });
+    bootstrap.Modal.getOrCreateInstance($('atlas-file-modal')).show();
+  }
+
   linkText(value) {
     if (value == null) return '';
     return (Array.isArray(value) ? value : [value]).map(v => (v && typeof v === 'object' ? v._title : `#${v}`)).join(', ');
@@ -242,12 +326,33 @@ class AtlasBrowser {
   actionButtons(data) {
     if (!data) return '';
     const can = data._can || {};
-    return `<div class="btn-group btn-group-sm">
-      <button type="button" class="btn btn-outline-primary" data-action="open" title="${can.update ? 'Edit' : 'View'}">
-        <i class="fas ${can.update ? 'fa-pen' : 'fa-eye'}"></i></button>
-      ${can.delete ? `<button type="button" class="btn btn-outline-danger" data-action="delete" title="Delete">
-        <i class="fas fa-trash"></i></button>` : ''}
+    const button = (action, key, label, icon, color, n) => `
+      <button type="button" class="btn btn-outline-secondary atlas-link-btn" data-action="${action}"
+        data-rel="${esc(key)}" title="${esc(label)} (${n})" ${n ? '' : 'disabled'}>
+        ${classIcon(icon, color)}<span>${n}</span></button>`;
+    const links = this.linkRelationships().map(r =>
+      button('links', r.key, r.label, r.target_icon, r.target_color, this.linked(data[r.key]).length)).join('');
+    const counts = data._incoming_counts || {};
+    const incoming = this.incomingLinks().map(r => {
+      const key = `${r.class}.${r.relationship}`;
+      return button('incoming', key, r.label, r.icon, r.color, counts[key] || 0);
+    }).join('');
+    return `<div class="atlas-row-actions">
+      <div class="btn-group btn-group-sm atlas-row-main">
+        <button type="button" class="btn btn-outline-primary" data-action="open" title="${can.update ? 'Edit' : 'View'}">
+          <i class="fas ${can.update ? 'fa-pen' : 'fa-eye'}"></i></button>
+        ${can.delete ? `<button type="button" class="btn btn-outline-danger" data-action="delete" title="Delete">
+          <i class="fas fa-trash"></i></button>` : ''}
+      </div>
+      ${links ? `<div class="btn-group btn-group-sm">${links}</div>` : ''}
+      ${incoming ? `<div class="btn-group btn-group-sm" title="Linked from">${incoming}</div>` : ''}
     </div>`;
+  }
+
+  // A relationship value as a list: null, one object or a list (ids, or {_id, _title} once expanded).
+  linked(value) {
+    if (value == null) return [];
+    return Array.isArray(value) ? value : [value];
   }
 
   onCell(p) {
@@ -255,6 +360,84 @@ class AtlasBrowser {
     if (!button || !p.data) return;
     if (button.dataset.action === 'open') this.go(p.data._id);
     if (button.dataset.action === 'delete') this.remove(p.data._id);
+    if (button.dataset.action === 'file') this.showFile(p.data, this.cls.attributes.find(a => a.key === button.dataset.attr));
+    if (button.dataset.action === 'links') {
+      const rel = this.cls.relationships.find(r => r.key === button.dataset.rel);
+      if (rel) this.showLinks(rel, p.data[rel.key]);
+    }
+    if (button.dataset.action === 'incoming') {
+      const rel = this.incomingLinks().find(r => `${r.class}.${r.relationship}` === button.dataset.rel);
+      if (rel) this.showIncoming(rel, p.data._id);
+    }
+  }
+
+  // -- links list (the portal's links modal, as Users & Permissions lists roles) --
+  // What this object links to: the titles are already in the row.
+  showLinks(rel, value) {
+    const items = this.linked(value).map(v => (v && typeof v === 'object' ? v : { _id: v, _title: `#${v}` }));
+    this.openLinks({ label: rel.label, cls: rel.target, classLabel: rel.target_label,
+                     icon: rel.target_icon, color: rel.target_color, items, total: items.length });
+  }
+
+  // What links to this object: asked from the other class (only objects you can read).
+  async showIncoming(rel, id) {
+    const spec = { label: rel.label, cls: rel.class, classLabel: rel.class_label, icon: rel.icon, color: rel.color,
+                   items: null, total: null };
+    this.openLinks(spec);
+    const qs = new URLSearchParams({ [rel.relationship]: id, fields: '_title', sort: '_title', page_size: 1000 });
+    try {
+      const result = await api(`${this.objectsUrl(rel.class)}?${qs}`);
+      Object.assign(spec, { items: result.items, total: result.total });
+    } catch (e) {
+      Object.assign(spec, { items: [], total: 0, error: e.message });
+    }
+    if (this.links === spec) this.renderLinks();
+  }
+
+  openLinks(spec) {
+    this.links = spec;
+    let search = document.getElementById('atlas-links-search');
+    if (!search) {                        // the modal is shared with other pages, so the box is added here
+      search = document.createElement('input');
+      Object.assign(search, { type: 'search', id: 'atlas-links-search', placeholder: 'Search',
+                              className: 'form-control form-control-sm mb-2', autocomplete: 'off' });
+      search.setAttribute('aria-label', 'Search the list');
+      search.addEventListener('input', () => this.renderLinks());
+      $('linksList').before(search);
+      $('showLinksModal').addEventListener('shown.bs.modal', () => search.focus());
+    }
+    search.value = '';
+    this.renderLinks();
+    bootstrap.Modal.getOrCreateInstance($('showLinksModal')).show();
+  }
+
+  renderLinks() {
+    const s = this.links;
+    if (!s) return;
+    $('showLinksModal').querySelector('.modal-title').textContent =
+      s.total == null ? s.label : `${s.label} (${s.total})`;
+    if (!s.items) {
+      $('linksList').innerHTML = '<li class="list-group-item text-muted">Loading…</li>';
+      return;
+    }
+    const words = fold($('atlas-links-search').value).split(/\s+/).filter(Boolean);
+    const shown = s.items.filter(i => words.every(w => fold(`${i._title} #${i._id}`).includes(w)));
+    let html = shown.map(i => `
+      <li class="list-group-item p-0">
+        <a class="atlas-link-item" href="#${esc(s.cls)}/${esc(i._id)}">
+          ${classIcon(s.icon, s.color)}
+          <span class="flex-grow-1">${esc(i._title)}</span>
+          <span class="text-muted small">${esc(s.classLabel)} #${esc(i._id)}</span>
+        </a>
+      </li>`).join('');
+    if (!shown.length) {
+      const empty = s.error || (s.items.length ? 'No matches.' : 'Nothing linked.');
+      html = `<li class="list-group-item text-muted">${esc(empty)}</li>`;
+    }
+    if (s.total > s.items.length) {
+      html += `<li class="list-group-item text-muted small">The first ${s.items.length} of ${s.total} are listed.</li>`;
+    }
+    $('linksList').innerHTML = html;
   }
 
   go(id) {
@@ -266,6 +449,7 @@ class AtlasBrowser {
       getRows: async params => {
         const size = params.endRow - params.startRow;
         const qs = new URLSearchParams({ page: Math.floor(params.startRow / size) + 1, page_size: size, expand: '*' });
+        if (this.incomingLinks().length) qs.set('incoming_counts', 'true');
         if (this.search) qs.set('q', this.search);
         const sort = params.sortModel.map(s => (s.sort === 'desc' ? '-' : '') + s.colId).join(',');
         if (sort) qs.set('sort', sort);
@@ -334,6 +518,7 @@ class AtlasBrowser {
       }
     }
     this.editing = obj;
+    this.dropFileChanges();
     this.renderForm(obj);
     this.modal.show();
   }
@@ -342,6 +527,7 @@ class AtlasBrowser {
     const c = this.cls;
     const isNew = !obj;
     const canEdit = isNew ? c.permissions.create : !!(obj._can && obj._can.update);
+    this.canEdit = canEdit;
     this.clearError();
     $('atlas-object-title').textContent = isNew ? `New · ${c.label}` : `${c.label} · ${obj._title}`;
 
@@ -349,6 +535,8 @@ class AtlasBrowser {
     for (const a of c.attributes) {
       if (a.type === 'lookthrough') {
         if (!isNew) fields.push(this.computedField(a, obj[a.key]));
+      } else if (FILE_TYPES.includes(a.type)) {
+        fields.push(`<div class="col-12" data-file-field="${esc(a.key)}"></div>`);
       } else {
         fields.push(this.inputField(a, obj ? obj[a.key] : null, canEdit));
       }
@@ -358,6 +546,7 @@ class AtlasBrowser {
     else if (obj && obj._roles.length) fields.push(this.rolesBadges(obj._roles));
     $('atlas-object-form').innerHTML = fields.join('') || '<p class="text-muted mb-0">This class has no fields yet.</p>';
 
+    for (const a of this.uploadAttributes()) this.renderFileField(a);
     for (const r of c.relationships) this.initLinkSelect(r, obj ? obj[r.key] : null, canEdit);
     if (IS_ADMIN) this.initRolesSelect(obj ? obj._roles : [], canEdit);
 
@@ -495,6 +684,153 @@ class AtlasBrowser {
       ).join('')}</div>`).join('');
   }
 
+  // -- image and file fields in the form ----------------------------------------
+  uploadAttributes() {
+    return this.cls ? this.cls.attributes.filter(a => FILE_TYPES.includes(a.type)) : [];
+  }
+
+  hasUpload(a) {
+    const change = this.fileChanges[a.key];
+    if (change) return !!change.file;
+    return !!(this.editing && this.editing[a.key]);
+  }
+
+  // Choose, drop or paste a file; Remove and Undo. Nothing is sent until Save.
+  bindFileFields() {
+    const form = $('atlas-object-form');
+    const attrOf = el => {
+      const zone = el && el.closest('[data-drop]');
+      return zone ? this.uploadAttributes().find(a => a.key === zone.dataset.drop) : null;
+    };
+    form.addEventListener('click', e => {
+      const button = e.target.closest('[data-file-act]');
+      const a = attrOf(button);
+      if (!a) return;
+      const act = button.dataset.fileAct;
+      if (act === 'choose') button.closest('[data-drop]').querySelector('input[type=file]').click();
+      if (act === 'remove') this.stageFile(a, this.editing && this.editing[a.key] ? { remove: true } : null);
+      if (act === 'undo') this.stageFile(a, null);
+    });
+    form.addEventListener('change', e => {
+      const a = e.target.matches('input[type=file]') ? attrOf(e.target) : null;
+      if (a && e.target.files[0]) this.pickFile(a, e.target.files[0]);
+    });
+    form.addEventListener('dragover', e => {
+      const zone = e.target.closest('[data-drop]');
+      if (!zone || !this.canEdit) return;
+      e.preventDefault();
+      zone.classList.add('dragging');
+    });
+    form.addEventListener('dragleave', e => {
+      const zone = e.target.closest('[data-drop]');
+      if (zone && !zone.contains(e.relatedTarget)) zone.classList.remove('dragging');
+    });
+    form.addEventListener('drop', e => {
+      const a = attrOf(e.target);
+      if (!a || !this.canEdit) return;
+      e.preventDefault();
+      e.target.closest('[data-drop]').classList.remove('dragging');
+      if (e.dataTransfer.files[0]) this.pickFile(a, e.dataTransfer.files[0]);
+    });
+    // Ctrl+V with an image on the clipboard: into the image field that has focus, or the only one.
+    $('atlas-object-modal').addEventListener('paste', e => {
+      if (!this.canEdit || !e.clipboardData) return;
+      const file = [...e.clipboardData.files].find(f => f.type.startsWith('image/'));
+      const focus = document.activeElement;
+      if (!file || (focus && focus.matches('input:not([type=file]), textarea, select'))) return;
+      const images = this.uploadAttributes().filter(a => a.type === 'image');
+      const focused = attrOf(focus);
+      const a = focused && focused.type === 'image' ? focused : (images.length === 1 ? images[0] : null);
+      if (!a) return;
+      e.preventDefault();
+      this.pickFile(a, file);
+    });
+  }
+
+  pickFile(a, file) {
+    this.clearError();
+    if (file.size > MAX_FILE_MB * 1024 * 1024) {
+      this.showError(`${file.name} is larger than ${MAX_FILE_MB} MB.`);
+      return;
+    }
+    const ext = `.${(file.name.split('.').pop() || '').toLowerCase()}`;
+    if (!ACCEPT[a.type].split(',').includes(ext)) {
+      this.showError(a.type === 'image'
+        ? `${a.label}: ${file.name} isn't a PNG, JPEG, GIF, WebP, TIFF or BMP image.`
+        : `${a.label}: ${file.name} isn't a PDF, Word, Excel, PowerPoint, OpenDocument or CSV file.`);
+      return;
+    }
+    this.stageFile(a, { file, url: a.type === 'image' && SHOWN_IMAGES.test(file.type) ? URL.createObjectURL(file) : null });
+  }
+
+  stageFile(a, change) {
+    const old = this.fileChanges[a.key];
+    if (old && old.url) URL.revokeObjectURL(old.url);
+    if (change) this.fileChanges[a.key] = change;
+    else delete this.fileChanges[a.key];
+    this.renderFileField(a);
+  }
+
+  dropFileChanges() {
+    for (const change of Object.values(this.fileChanges)) if (change.url) URL.revokeObjectURL(change.url);
+    this.fileChanges = {};
+  }
+
+  renderFileField(a) {
+    const box = $('atlas-object-form').querySelector(`[data-file-field="${CSS.escape(a.key)}"]`);
+    if (!box) return;
+    const obj = this.editing;
+    const current = obj ? obj[a.key] : null;
+    const change = this.fileChanges[a.key];
+    const isImage = a.type === 'image';
+    const glyph = name => {
+      if (isImage || !name) return `<i class="fas ${isImage ? 'fa-image' : 'fa-file'} fa-2x text-muted"></i>`;
+      const [icon, color] = fileIcon(name);
+      return `<i class="fas ${icon} fa-2x" style="color:${color}"></i>`;
+    };
+    let preview;
+    let info;
+    if (change && change.file) {
+      preview = change.url ? `<img src="${change.url}" alt="">` : glyph(change.file.name);
+      info = `<div class="text-truncate">${esc(change.file.name)}</div>
+        <div class="small text-muted">${fmtSize(change.file.size)} · uploaded when you save</div>`;
+    } else if (change && change.remove) {
+      preview = glyph('');
+      info = `<div class="text-truncate text-decoration-line-through">${esc(current ? current.name : '')}</div>
+        <div class="small text-muted">removed when you save</div>`;
+    } else if (current) {
+      const at = opts => this.fileUrl(obj._id, a.key, { ...opts, v: obj._version });
+      preview = isImage ? `<img src="${esc(at({ view: 'thumb' }))}" alt="">` : glyph(current.name);
+      const open = isImage || current.type === 'application/pdf'
+        ? `<a href="${esc(at({ view: isImage ? 'preview' : 'original' }))}" target="_blank" rel="noopener">Open</a> · ` : '';
+      info = `<div class="text-truncate">${esc(current.name)}</div>
+        <div class="small text-muted">${fmtSize(current.size)}${current.width ? ` · ${current.width} × ${current.height}` : ''}
+          · ${open}<a href="${esc(at({ download: true }))}">Download</a></div>`;
+    } else {
+      preview = glyph('');
+      info = `<div class="text-muted">${isImage ? 'No image' : 'No file'}</div>`;
+    }
+    let actions = '';
+    if (this.canEdit) {
+      const has = (change && change.file) || (current && !(change && change.remove));
+      actions = `<button type="button" class="btn btn-sm btn-outline-secondary" data-file-act="choose">
+          <i class="fas fa-upload me-1"></i>${has ? 'Replace' : 'Choose'}</button>
+        ${has ? '<button type="button" class="btn btn-sm btn-outline-danger" data-file-act="remove">Remove</button>' : ''}
+        ${change ? '<button type="button" class="btn btn-sm btn-link px-1" data-file-act="undo">Undo</button>' : ''}`;
+    }
+    const kinds = isImage ? 'PNG, JPEG, GIF, WebP, TIFF or BMP' : 'PDF, Word, Excel, PowerPoint, OpenDocument or CSV';
+    const required = a.required ? ' <span class="text-danger">*</span>' : '';
+    box.innerHTML = `
+      <span class="form-label d-block">${esc(a.label)}${required}</span>
+      <div class="atlas-drop" data-drop="${esc(a.key)}" tabindex="${this.canEdit ? 0 : -1}">
+        <div class="atlas-drop-preview">${preview}</div>
+        <div class="atlas-drop-info">${info}</div>
+        <div class="atlas-drop-actions">${actions}</div>
+        <input type="file" class="d-none" accept="${esc(ACCEPT[a.type])}">
+      </div>
+      ${this.canEdit ? `<div class="form-text">${kinds}, up to ${MAX_FILE_MB} MB. Drop a file here${isImage ? ' or paste one with Ctrl+V' : ''}.</div>` : ''}`;
+  }
+
   collect() {
     const out = {};
     for (const el of $('atlas-object-form').querySelectorAll('[data-type]')) {
@@ -511,6 +847,8 @@ class AtlasBrowser {
     return out;
   }
 
+  // Uploads are sent separately from the other fields. Editing: uploads first (a required
+  // image can come in the same save), then the rest. New: the object first, then its uploads.
   async save() {
     this.clearError();
     const bad = [...$('atlas-object-form').querySelectorAll('input[data-type]')].find(el => el.validity.badInput);
@@ -519,20 +857,53 @@ class AtlasBrowser {
       this.showError(`${attr ? attr.label : 'A field'} has a value that isn't valid.`);
       return;
     }
+    const missing = this.uploadAttributes().filter(a => a.required && !this.hasUpload(a));
+    if (missing.length) {
+      this.showError(`Required: ${missing.map(a => a.label).join(', ')}.`);
+      return;
+    }
     $('atlas-object-save').disabled = true;
+    const wasNew = !this.editing;
     try {
-      if (this.editing) {
-        await api(`${this.objectsUrl()}/${this.editing._id}`, { method: 'PATCH', body: this.collect() });
+      if (wasNew) {
+        this.editing = await api(this.objectsUrl(), { method: 'POST', body: this.collect() });
+        await this.sendUploads();
       } else {
-        await api(this.objectsUrl(), { method: 'POST', body: this.collect() });
+        await this.sendUploads();
+        this.editing = await api(`${this.objectsUrl()}/${this.editing._id}`, { method: 'PATCH', body: this.collect() });
       }
       this.modal.hide();
       this.refreshGrid();
     } catch (e) {
       this.showError(e.message);
+      if (this.editing && this.editing._version != null) this.savedInPart(wasNew);
     } finally {
       $('atlas-object-save').disabled = false;
     }
+  }
+
+  // Send the staged uploads and removals, keeping this.editing at the latest version.
+  async sendUploads() {
+    for (const a of this.uploadAttributes()) {
+      const change = this.fileChanges[a.key];
+      if (!change) continue;
+      const url = `${this.objectsUrl()}/${this.editing._id}/files/${encodeURIComponent(a.key)}`;
+      this.editing = change.file
+        ? await upload(url, change.file, this.editing._version)
+        : await api(`${url}?_version=${this.editing._version}`, { method: 'DELETE' });
+      this.stageFile(a, null);
+    }
+  }
+
+  // Part of a save went through (e.g. the object was created but an upload failed):
+  // the form now shows that object, and Save sends what is left.
+  savedInPart(wasNew) {
+    if (wasNew) {
+      $('atlas-object-title').textContent = `${this.cls.label} · ${this.editing._title || `#${this.editing._id}`}`;
+      history.replaceState(null, '', `#${this.cls.key}/${this.editing._id}`);
+    }
+    for (const a of this.uploadAttributes()) this.renderFileField(a);
+    this.refreshGrid();
   }
 
   async remove(id) {

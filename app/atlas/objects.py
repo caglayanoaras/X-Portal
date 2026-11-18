@@ -7,6 +7,9 @@ An object in the API:
      "sample": "S-12", "result": "fail",      stored attributes
      "lab_code": "L1",                         look-throughs (a list when the path
                                                passes a 'many' relationship)
+     "photo": {"name": "s12.jpg", "type": "image/jpeg", "size": 48213,
+               "width": 1600, "height": 1200}, an upload (null when empty); the file
+                                               itself is at …/objects/5/files/photo
      "location": 3, "retests": [9, 12],        relationships: an id ('one') or ids
                                                ('many'); {"_id", "_title"} with expand
      "_roles": [], "_created_at": "…Z", "_created_by": "…", "_updated_at": "…Z",
@@ -23,11 +26,13 @@ import os
 import re
 import sqlite3
 
+from app.atlas import files
 from app.atlas.db import connect, db_path, fold, transaction
 from app.atlas.errors import AtlasError
 from app.atlas.permissions import Viewer, can_create, can_on_row, row_filter
-from app.atlas.schema import SYSTEM_FIELDS, AtlasClass, Relationship, Schema, q, utc_now
-from app.atlas.values import coerce, object_ids, out_value, parse_date, parse_datetime, parse_flag, role_ids
+from app.atlas.schema import FILE_TYPES, SYSTEM_FIELDS, AtlasClass, Relationship, Schema, q, utc_now
+from app.atlas.values import (coerce, object_ids, out_value, parse_date, parse_datetime, parse_flag,
+                              parse_number, role_ids)
 
 FILTER_OPS = frozenset({"eq", "ne", "gt", "gte", "lt", "lte", "contains", "startswith", "in", "isnull", "on"})
 _COMPARE = {"eq": "=", "gt": ">", "gte": ">=", "lt": "<", "lte": "<="}
@@ -62,6 +67,7 @@ class Query:
         self.schema, self.cls, self.viewer = schema, cls, viewer
         self._n = 0
         self._paths = {}
+        self._counted = None        # incoming relationships select() counts (None: not asked for)
 
     def _alias(self, prefix: str) -> str:
         self._n += 1
@@ -107,7 +113,14 @@ class Query:
 
     def value(self, attr, src: str, mode: str = "api") -> str:
         """An attribute's value on row src. mode: api (a JSON list for 'many'
-        look-throughs), text (comma-joined) or sort (the smallest value)."""
+        look-throughs; for an upload, a JSON object describing it), text
+        (comma-joined) or sort (the smallest value)."""
+        if attr.type in FILE_TYPES:
+            if mode != "api":
+                return self.file_name(attr, src)
+            sizes = ", 'width', f.width, 'height', f.height" if attr.type == "image" else ""
+            return (f"(SELECT json_object('name', f.name, 'type', f.type, 'size', f.size{sizes}) "
+                    f"FROM atlas_file f WHERE f.id = {src}.{q(attr.key)})")
         if attr.stored:
             return f"{src}.{q(attr.key)}"
         rels, final = self.path(attr)
@@ -119,6 +132,11 @@ class Query:
         if all(r.cardinality == "one" for r in rels):
             return f"(SELECT {col} FROM {frm} WHERE {where} LIMIT 1)"
         return f"(SELECT json_group_array({col}) FROM {frm} WHERE {where} AND {col} IS NOT NULL)"
+
+    @staticmethod
+    def file_name(attr, src: str) -> str:
+        """The name of the file an image or file attribute holds on row src."""
+        return f"(SELECT f.name FROM atlas_file f WHERE f.id = {src}.{q(attr.key)})"
 
     def title(self, cls: AtlasClass, src: str) -> str:
         """An object's title: its title attributes joined with ' · ', else '#id'."""
@@ -153,9 +171,7 @@ class Query:
     def _filter_value(ftype: str, raw, name: str):
         try:
             if ftype in ("int", "float"):
-                number = coerce("float", raw)
-                if number is None:
-                    raise ValueError("is missing")
+                number = parse_number(raw)
                 return int(number) if number.is_integer() else number
             if ftype == "boolean":
                 return coerce("boolean", raw)
@@ -216,6 +232,13 @@ class Query:
             return self._scalar(f"s.{q(name)}", SYSTEM_FIELDS[name], op, raw, name)
         if kind == "rel":
             return self._relationship_condition(member, op, raw, name)
+        if member.type in FILE_TYPES:         # uploads filter by whether there is one, or by file name
+            if op == "isnull":
+                return self._scalar(f"s.{q(member.key)}", "int", op, raw, name)
+            if op not in ("eq", "ne", "contains", "startswith"):
+                raise AtlasError(400, f"Filter '{name}': images and files support isnull, and eq, ne, "
+                                      f"contains and startswith on the file name.")
+            return self._scalar(self.file_name(member, "s"), "string", op, raw, name)
         if member.stored:
             return self._scalar(f"s.{q(member.key)}", member.type, op, raw, name)
         rels, final = self.path(member)       # look-through: true when any value matches
@@ -242,7 +265,9 @@ class Query:
             for attr in self.cls.attributes:
                 if self.final_type(attr) == "boolean":
                     continue
-                if attr.stored:
+                if attr.type in FILE_TYPES:
+                    parts.append(f"atlas_fold({self.file_name(attr, 's')}) LIKE ? {_ESCAPE}")
+                elif attr.stored:
                     parts.append(f"atlas_fold(CAST(s.{q(attr.key)} AS TEXT)) LIKE ? {_ESCAPE}")
                 else:
                     rels, final = self.path(attr)
@@ -309,7 +334,19 @@ class Query:
             raise AtlasError(400, f"Unknown field(s) in fields: {', '.join(sorted(unknown))}.")
         return names | {"_id"}
 
-    def select(self, fields=None):
+    def incoming_counts(self):
+        """Per incoming relationship, how many objects the viewer can read link to row s."""
+        cols, args = [], []
+        self._counted = list(self.schema.incoming(self.cls))
+        for n, rel in enumerate(self._counted):
+            k, i = self._alias("k"), self._alias("i")
+            read, read_args = row_filter(self.viewer, rel.cls, "read", i)
+            cols.append(f'(SELECT COUNT(*) FROM {q(rel.link_table)} {k} JOIN {q(rel.cls.table)} {i} '
+                        f'ON {i}."_id" = {k}.source_id WHERE {k}.target_id = s."_id" AND ({read})) AS "_in_{n}"')
+            args += read_args
+        return cols, args
+
+    def select(self, fields=None, *, incoming_counts=False):
         def want(key):
             return fields is None or key in fields
 
@@ -330,6 +367,10 @@ class Query:
                 cond, cond_args = row_filter(self.viewer, self.cls, op, "s")
                 cols.append(f'CASE WHEN {cond} THEN 1 ELSE 0 END AS "_can_{op}"')
                 args += cond_args
+        if incoming_counts:
+            count_cols, count_args = self.incoming_counts()
+            cols += count_cols
+            args += count_args
         return ", ".join(cols), args
 
     def to_api(self, row) -> dict:
@@ -340,7 +381,9 @@ class Query:
         for attr in self.cls.attributes:
             if attr.key in keys:
                 value, ftype = row[attr.key], self.final_type(attr)
-                if self.is_many(attr):
+                if ftype in FILE_TYPES:
+                    out[attr.key] = json.loads(value) if value else None
+                elif self.is_many(attr):
                     out[attr.key] = [out_value(ftype, v) for v in json.loads(value or "[]")]
                 else:
                     out[attr.key] = out_value(ftype, value)
@@ -355,6 +398,9 @@ class Query:
                 out[name] = row[name]
         if "_can_update" in keys:
             out["_can"] = {"update": bool(row["_can_update"]), "delete": bool(row["_can_delete"])}
+        if self._counted is not None:
+            out["_incoming_counts"] = {f"{rel.cls.key}.{rel.key}": row[f"_in_{n}"]
+                                       for n, rel in enumerate(self._counted)}
         return out
 
     def titles(self, conn, cls: AtlasClass, ids) -> dict:
@@ -408,14 +454,17 @@ def class_visible(conn, viewer: Viewer, cls: AtlasClass) -> bool:
 
 
 def list_objects(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, filters, *, text=None, sort=None,
-                 page: int = 1, page_size: int = PAGE_SIZE, expand=None, fields=None) -> dict:
+                 page: int = 1, page_size: int = PAGE_SIZE, expand=None, fields=None,
+                 incoming_counts: bool = False) -> dict:
+    """A page of objects. With incoming_counts, each one also gets _incoming_counts:
+    {"class.relationship": how many objects you can read link to it that way}."""
     query = Query(schema, cls, viewer)
     page = max(1, int(page))
     page_size = min(max(1, int(page_size)), PAGE_SIZE_MAX)
     wanted = query.parse_fields(fields)
     where, args = query.where(filters, text)
     total = conn.execute(f"SELECT COUNT(*) FROM {q(cls.table)} s WHERE {where}", args).fetchone()[0]
-    select_sql, select_args = query.select(wanted)
+    select_sql, select_args = query.select(wanted, incoming_counts=incoming_counts)
     rows = conn.execute(
         f"SELECT {select_sql} FROM {q(cls.table)} s WHERE {where} "
         f"ORDER BY {query.order_by(sort or '_id')} LIMIT ? OFFSET ?",
@@ -478,7 +527,12 @@ def _parse_write(cls: AtlasClass, payload, viewer: Viewer, current_roles: list):
             continue
         attr = cls.attr(key)
         if attr is not None:
-            if attr.stored:                       # look-throughs are computed: ignored
+            if attr.type in FILE_TYPES:           # uploads go through PUT …/files/<key>
+                if value is None:
+                    values[key] = None            # null clears it
+                elif not isinstance(value, dict):  # a dict is what GET returned: left as it is
+                    errors.append(f"{attr.label}: upload it with PUT …/objects/<id>/files/{key}.")
+            elif attr.stored:                     # look-throughs are computed: ignored
                 try:
                     values[key] = coerce(attr.type, value, attr.options)
                 except ValueError as exc:
@@ -510,8 +564,11 @@ def _check_roles(roles, valid_roles) -> None:
         raise AtlasError(400, "Unknown role id(s): " + ", ".join(map(str, unknown)) + ".")
 
 
-def _require(cls: AtlasClass, values: dict, links: dict) -> None:
-    missing = [a.label for a in cls.stored_attributes if a.required and values.get(a.key) is None]
+def _require(cls: AtlasClass, values: dict, links: dict, *, uploads: bool = True) -> None:
+    """Required attributes and relationships need a value. A new object can't carry
+    its uploads yet (they are sent once it exists), so creating skips those."""
+    missing = [a.label for a in cls.stored_attributes
+               if a.required and values.get(a.key) is None and (uploads or a.type not in FILE_TYPES)]
     missing += [r.label for r in cls.relationships if r.required and not links.get(r.key)]
     if missing:
         raise AtlasError(400, "Required: " + ", ".join(missing) + ".")
@@ -563,7 +620,7 @@ def create_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, payload
     values, links, roles = _parse_write(cls, payload, viewer, [])
     roles = roles or []
     _check_roles(roles, valid_roles)
-    _require(cls, values, links)
+    _require(cls, values, links, uploads=False)
     now = utc_now()
     columns = [*_META, *values]
     with transaction(conn):
@@ -630,10 +687,13 @@ def update_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_
             raise AtlasError(409, f"{cls.label} #{object_id} was changed meanwhile. Reload it and try again.")
         for key, ids in relinked.items():
             _write_links(conn, cls.rel(key), object_id, ids)
+        files.delete(conn, [row[k] for k, v in changed.items() if v is None and cls.attr(k).type in FILE_TYPES])
 
 
 def delete_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_id: int) -> None:
-    row = conn.execute(f'SELECT "_roles" FROM {q(cls.table)} WHERE "_id" = ?', (object_id,)).fetchone()
+    uploads = [a.key for a in cls.stored_attributes if a.type in FILE_TYPES]
+    row = conn.execute(f'SELECT {", ".join(q(c) for c in ["_roles", *uploads])} FROM {q(cls.table)} '
+                       f'WHERE "_id" = ?', (object_id,)).fetchone()
     current_roles = json.loads(row["_roles"]) if row else []
     if row is None or not can_on_row(viewer, cls, "read", current_roles):
         raise _not_found(cls, object_id)
@@ -651,6 +711,60 @@ def delete_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_
                                   + ", ".join(f"#{i}" for i in stuck) + ". Link those to something else first.")
     with transaction(conn):
         conn.execute(f'DELETE FROM {q(cls.table)} WHERE "_id" = ?', (object_id,))
+        files.delete(conn, [row[key] for key in uploads])
+
+
+# --------------------------------------------------------------------------- #
+# Uploads (image and file attributes)
+# --------------------------------------------------------------------------- #
+def upload_attribute(cls: AtlasClass, key: str):
+    attr = cls.attr(key)
+    if attr is None or attr.type not in FILE_TYPES:
+        raise AtlasError(404, f"{cls.label} has no image or file attribute '{key}'.")
+    return attr
+
+
+def set_file(conn, cls: AtlasClass, viewer: Viewer, object_id: int, key: str, stored, version=None) -> None:
+    """Put an upload (as files.prepare() returns it) into an image or file attribute,
+    or clear it (stored=None); the file it replaces is deleted. With a version, it
+    fails with 409 if the object changed since that version was read."""
+    attr = upload_attribute(cls, key)
+    row = conn.execute(f'SELECT "_id", "_roles", "_version", "_updated_by", {q(key)} AS current '
+                       f'FROM {q(cls.table)} WHERE "_id" = ?', (object_id,)).fetchone()
+    roles = json.loads(row["_roles"]) if row else []
+    if row is None or not can_on_row(viewer, cls, "read", roles):
+        raise _not_found(cls, object_id)
+    if not can_on_row(viewer, cls, "update", roles):
+        raise AtlasError(403, f"You can't change {cls.label} #{object_id}.")
+    if version is not None and int(version) != row["_version"]:
+        raise _changed(cls, row)
+    if stored is None and attr.required:
+        raise AtlasError(400, f"{attr.label} is required: upload another one instead.")
+    if stored is None and row["current"] is None:
+        return                                   # nothing to clear: no new version
+    now = utc_now()
+    with transaction(conn):
+        new_id = files.insert(conn, stored, viewer.username, now) if stored is not None else None
+        cursor = conn.execute(
+            f'UPDATE {q(cls.table)} SET {q(key)} = ?, "_updated_at" = ?, "_updated_by" = ?, '
+            f'"_version" = "_version" + 1 WHERE "_id" = ? AND "_version" = ?',
+            (new_id, now, viewer.username, object_id, row["_version"]))
+        if cursor.rowcount == 0:
+            raise AtlasError(409, f"{cls.label} #{object_id} was changed meanwhile. Reload it and try again.")
+        files.delete(conn, [row["current"]])
+
+
+def get_file(conn, cls: AtlasClass, viewer: Viewer, object_id: int, key: str, view: str = "original") -> dict:
+    """An object's upload as files.load() returns it, when the viewer may read the object."""
+    attr = upload_attribute(cls, key)
+    read, read_args = row_filter(viewer, cls, "read", "s")
+    row = conn.execute(f'SELECT s.{q(key)} FROM {q(cls.table)} s WHERE s."_id" = ? AND ({read})',
+                       [object_id, *read_args]).fetchone()
+    if row is None:
+        raise _not_found(cls, object_id)
+    if row[0] is None:
+        raise AtlasError(404, f"{cls.label} #{object_id} has no {attr.label}.")
+    return files.load(conn, row[0], view)
 
 
 # --------------------------------------------------------------------------- #

@@ -3,7 +3,7 @@
 {% block title %}Atlas{% endblock %}
 
 {% block styles %}
-<link rel="stylesheet" href="{{ url_for('static', path='/css/atlas.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', path='/css/atlas.css') }}?v={{ asset_version('css/atlas.css') }}">
 {% endblock %}
 
 {% block content %}
@@ -11,7 +11,10 @@
      data-url-classes="{{ url_for('atlas_api_classes') }}"
      data-url-roles="{{ url_for('atlas_api_roles') }}"
      data-url-admin="{{ url_for('atlas_admin_page') }}"
-     data-is-admin="{{ 'true' if is_atlas_admin else 'false' }}">
+     data-is-admin="{{ 'true' if is_atlas_admin else 'false' }}"
+     data-max-file-mb="{{ max_file_mb }}"
+     data-image-accept="{{ image_accept }}"
+     data-file-accept="{{ file_accept }}">
 
   <aside class="atlas-sidebar">
     <input type="search" class="form-control form-control-sm mb-2" id="atlas-tree-filter"
@@ -30,7 +33,9 @@
     <section id="atlas-class" class="d-none">
       <div class="d-flex flex-wrap gap-3 justify-content-between align-items-start mb-3">
         <div>
-          <h3 class="mb-1" id="atlas-class-label"></h3>
+          <h3 class="mb-1 d-flex align-items-center gap-2">
+            <span id="atlas-class-icon"></span><span id="atlas-class-label"></span>
+          </h3>
           <div class="text-muted small" id="atlas-class-description"></div>
         </div>
         <div class="d-flex gap-2 align-items-center">
@@ -75,9 +80,33 @@
     </div>
   </div>
 </div>
+
+<!-- An image or file, opened from the grid -->
+<div class="modal fade" id="atlas-file-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title text-truncate" id="atlas-file-title"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body text-center" id="atlas-file-body"></div>
+      <div class="modal-footer">
+        <span class="text-muted small me-auto text-truncate" id="atlas-file-meta"></span>
+        <a class="btn btn-outline-secondary" id="atlas-file-open" target="_blank" rel="noopener">
+          <i class="fas fa-up-right-from-square me-1"></i>Open in new tab
+        </a>
+        <a class="btn btn-primary" id="atlas-file-download"><i class="fas fa-download me-1"></i>Download</a>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
 <script src="{{ url_for('static', path='/js/ag-grid-enterprise.min.js') }}"></script>
-<script type="module" src="{{ url_for('static', path='js/apps/atlas-app.js') }}"></script>
+{# Versioned URLs (?v=): a changed file gets a new URL, so no browser mixes old and new scripts.
+   The import map does the same for the shared module the page script imports. #}
+{% set common = url_for('static', path='js/apps/atlas-common.js') %}
+<script type="importmap">{"imports": {"{{ common }}": "{{ common }}?v={{ asset_version('js/apps/atlas-common.js') }}"}}</script>
+<script type="module" src="{{ url_for('static', path='js/apps/atlas-app.js') }}?v={{ asset_version('js/apps/atlas-app.js') }}"></script>
 {% endblock %}

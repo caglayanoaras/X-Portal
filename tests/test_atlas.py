@@ -7,6 +7,7 @@ neither db.sqlite3 nor atlas.db is touched. Run from the repo root:
 
 (pytest also finds test_atlas if it is installed.)
 """
+import io
 import os
 import secrets
 import shutil
@@ -19,6 +20,7 @@ TMP = tempfile.mkdtemp(prefix="atlas_test_")
 os.environ["DATABASE_URL"] = "sqlite:///" + os.path.join(TMP, "portal.db").replace("\\", "/")
 os.environ["ATLAS_DB_PATH"] = os.path.join(TMP, "atlas.db")
 os.environ["SECRET_KEY"] = secrets.token_hex(16)
+os.environ["ATLAS_MAX_FILE_MB"] = "1"     # so the size limit is quick to hit
 os.chdir(ROOT)                       # the app serves app/static and app/templates by relative path
 sys.path.insert(0, ROOT)
 
@@ -44,7 +46,7 @@ class Api:
         self.tokens[username] = r.json()["access_token"]
 
     def __call__(self, method, url, user, expect=None, accept="application/json", **kw):
-        headers = {"Accept": accept, "Authorization": f"Bearer {self.tokens[user]}"}
+        headers = {"Accept": accept, "Authorization": f"Bearer {self.tokens[user]}", **kw.pop("headers", {})}
         r = self.client.request(method, url, headers=headers, follow_redirects=False, **kw)
         if expect is not None and r.status_code != expect:
             raise AssertionError(f"{method} {url} as {user}: expected {expect}, got {r.status_code}: {r.text[:600]}")
@@ -81,18 +83,49 @@ def seed_portal():
         return {name: role.id for name, role in roles.items()}
 
 
+def make_v1_atlas_db():
+    """An atlas.db as the first version left it (atlas_class had no color or icon)."""
+    conn = sqlite3.connect(os.environ["ATLAS_DB_PATH"])
+    try:
+        conn.executescript("""
+            CREATE TABLE atlas_class (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+                path TEXT NOT NULL DEFAULT '', description TEXT NOT NULL DEFAULT '',
+                roles TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, created_by TEXT NOT NULL,
+                updated_at TEXT NOT NULL, updated_by TEXT NOT NULL);
+            PRAGMA user_version = 1;""")
+    finally:
+        conn.close()
+
+
+def check_migrated():
+    conn = sqlite3.connect(os.environ["ATLAS_DB_PATH"])
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(atlas_class)")}
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        conn.close()
+    assert {"color", "icon"} <= columns and version == 2, (columns, version)
+
+
 def ids(response):
     return sorted(item["_id"] for item in response.json()["items"])
 
 
 def run(api, role):
     # --- access ----------------------------------------------------------------
+    r = api.client.get("/static/js/apps/atlas-app.js")
+    assert r.headers.get("cache-control") == "no-cache", r.headers   # browsers re-check edited scripts
+    r = api.client.get("/static/webfonts/Gotham-Medium.otf")
+    assert r.status_code == 200 and "cache-control" not in r.headers, r.headers   # fonts cache as usual
     api("GET", API, "ux", 403)                                   # no Atlas module
     api("POST", API, "ua", 403, json={"key": "x", "label": "X"})  # not an admin
     r = api("GET", "/atlas/admin", "un", accept="text/html")
     assert r.status_code == 303 and r.headers["location"].endswith("/atlas/"), r.status_code
-    api("GET", "/atlas/", "sa", 200, accept="text/html")
-    api("GET", "/atlas/admin", "da", 200, accept="text/html")
+    page = api("GET", "/atlas/", "sa", 200, accept="text/html").text      # versioned script URLs
+    assert "atlas-app.js?v=" in page and 'type="importmap"' in page and "atlas-common.js?v=" in page, page[-900:]
+    page = api("GET", "/atlas/admin", "da", 200, accept="text/html").text
+    assert "atlas-admin-app.js?v=" in page and "atlas.css?v=" in page and "atlas-common.js?v=" in page, page[-900:]
 
     # --- definitions -----------------------------------------------------------
     bad = [
@@ -102,11 +135,15 @@ def run(api, role):
         {"key": "x", "label": "X", "attributes": [{"key": "a", "label": "A", "type": "lookthrough", "lookup": "nope.code"}]},
         {"key": "x", "label": "X", "roles": [999]},
         {"key": "x", "label": "X", "relationships": [{"key": "r", "label": "R", "target": "nowhere"}]},
+        {"key": "x", "label": "X", "color": "blue"},
+        {"key": "x", "label": "X", "icon": "flask"},
+        {"key": "x", "label": "X", "icon": 'fa-flask" onmouseover="x'},
+        {"key": "x", "label": "X", "attributes": [{"key": "incoming_counts", "label": "I"}]},   # reserved
     ]
     for body in bad:
         api("POST", API, "da", 400, json=body)
 
-    labs = {"key": "labs", "label": "Laboratuvarlar", "attributes": [
+    labs = {"key": "labs", "label": "Laboratuvarlar", "color": "#0E7490", "icon": "fa-flask", "attributes": [
         {"key": "code", "label": "Kod", "type": "string", "required": True, "unique": True, "title": True},
         {"key": "name", "label": "İsim", "type": "string"}]}
     locations = {"key": "locations", "label": "Lokasyonlar", "path": "Depo", "attributes": [
@@ -142,8 +179,15 @@ def run(api, role):
         "relationships": [{"key": "me", "label": "Me", "target": "loops"}]}
     api("POST", API, "da", 400, json=loop)
 
-    visible = [c["key"] for c in api("GET", API, "un", 200).json()]
+    listed = api("GET", API, "un", 200).json()
+    visible = [c["key"] for c in listed]
     assert visible == ["labs", "batches", "locations"], visible   # tests: lab_a only
+    assert (listed[0]["color"], listed[0]["icon"]) == ("#0e7490", "fa-flask"), listed[0]
+    assert (listed[1]["color"], listed[1]["icon"]) == ("", ""), listed[1]
+    location_def = api("GET", f"{API}/locations", "da", 200).json()
+    lab_link = location_def["relationships"][0]
+    assert (lab_link["target_color"], lab_link["target_icon"]) == ("#0e7490", "fa-flask"), lab_link
+    api("PUT", f"{API}/locations", "da", 200, json=location_def)    # a GET's JSON goes straight back
     api("GET", f"{API}/tests", "un", 404)
     assert api("GET", f"{API}/batches", "ua", 200).json()["attributes"][3]["value_type"] == "string"
     assert "roles" not in api("GET", f"{API}/tests", "ua", 200).json()        # roles: admins only
@@ -194,6 +238,8 @@ def run(api, role):
     api("PATCH", f"{tests_url}/{t1['_id']}", "ua", 403, json={"_roles": []})          # roles: admins only
     api("PATCH", f"{tests_url}/{t1['_id']}", "ua", 200, json={"_roles": [role["quality"]]})  # unchanged: fine
     api("PATCH", f"{tests_url}/{t1['_id']}", "ua", 400, json={"result": "maybe"})
+    r = api("PATCH", f"{tests_url}/{t1['_id']}", "ua", 400, json={"measured": "abc"})
+    assert r.json()["detail"] == "Measured must be a float.", r.json()
 
     v = api("GET", f"{tests_url}/{t1['_id']}", "ua", 200).json()["_version"]
     t1 = api("PATCH", f"{tests_url}/{t1['_id']}", "ua", 200, json={"measured": 2, "_version": v}).json()
@@ -213,6 +259,10 @@ def run(api, role):
         (5, "2026-11-06T10:30:00", "L-1", ["fail"]), b1
     b2 = api("POST", b_url, "ua", 201, json={"batch_no": "B-2", "qty": 12, "location": loc["_id"],
                                              "retests": [t1["_id"], t2["_id"]]}).json()
+    r = api("POST", b_url, "ua", 400, json={"batch_no": "B-9", "qty": "1.5", "location": loc["_id"]})
+    assert r.json()["detail"] == "Qty must be an integer.", r.json()
+    r = api("GET", b_url, "ua", 400, params={"qty__gte": "abc"})       # filters take any number
+    assert r.json()["detail"] == "Filter 'qty': the value must be a number.", r.json()
 
     def query(params, user="ua"):
         return ids(api("GET", b_url, user, 200, params=params))
@@ -251,6 +301,20 @@ def run(api, role):
                         {"class": "batches", "class_label": "Batches", "relationship": "retests",
                          "label": "Retest of", "items": [{"_id": b2["_id"], "_title": "B-2"}]}]
 
+    # the reverse side in lists: per incoming relationship, how many readable objects link here
+    def counts(user):
+        items = api("GET", tests_url, user, 200, params={"incoming_counts": "true"}).json()["items"]
+        return {i["_id"]: i["_incoming_counts"] for i in items}
+    assert counts("ua")[t1["_id"]] == {"batches.receiving_tests": 1, "batches.retests": 1,
+                                       "tests.original": 1}, counts("ua")
+    assert counts("uq") == {t1["_id"]: {"batches.receiving_tests": 1, "batches.retests": 1,
+                                        "tests.original": 0}}, counts("uq")     # uq can't read S-2
+    assert "_incoming_counts" not in api("GET", tests_url, "ua", 200).json()["items"][0]
+    entry = next(e for e in api("GET", f"{API}/tests", "ua", 200).json()["incoming"]
+                 if e["relationship"] == "retests")
+    assert entry == {"class": "batches", "class_label": "Batches", "relationship": "retests",
+                     "label": "Retest of", "show": True, "color": "", "icon": ""}, entry
+
     api("DELETE", f"{loc_url}/{loc['_id']}", "un", 409)                    # the only location of B-1, B-2
     api("PATCH", f"{b_url}/{b2['_id']}", "ua", 409, json={"batch_no": "B-1"})
     api("DELETE", f"{tests_url}/{t2['_id']}", "ua", 204)
@@ -271,6 +335,7 @@ def run(api, role):
     batches["attributes"][-1]["type"] = "int"                              # 'abc' doesn't survive
     r = api("PUT", f"{API}/batches", "da", 409, json=batches)
     assert r.json()["requires_force"] and len(r.json()["warnings"]) == 1, r.json()
+    assert r.json()["warnings"][0] == "Changing 'Notes' to integer clears 1 value(s) that don't fit.", r.json()
     api("PUT", f"{API}/batches?force=true", "da", 200, json=batches)
     assert [api("GET", f"{b_url}/{b['_id']}", "ua", 200).json()["notes"] for b in (b1, b2)] == [None, 7]
     batches["attributes"].pop()                                            # remove notes (B-2 has 7)
@@ -289,6 +354,9 @@ def run(api, role):
     api("PUT", f"{API}/batches", "da", 409, json=batches)
     api("PUT", f"{API}/batches?force=true", "da", 200, json=batches)
 
+    labs.update(color="", icon="fa-microscope")                              # a new look, same data
+    out = api("PUT", f"{API}/labs", "da", 200, json=labs).json()
+    assert (out["color"], out["icon"]) == ("", "fa-microscope"), out
     api("PATCH", f"{labs_url}/{l2['_id']}", "un", 200, json={"name": "Çelik Lab"})
     labs["attributes"][1]["unique"] = True
     api("PUT", f"{API}/labs", "da", 409, json=labs)                        # duplicate names
@@ -317,14 +385,151 @@ def run(api, role):
     assert not left, left
 
 
+def image_bytes(size=(64, 48), fmt="PNG"):
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", size, (190, 40, 30)).save(buffer, fmt)
+    return buffer.getvalue()
+
+
+def tiff16_bytes():
+    """A 16-bit greyscale TIFF, as microscope software writes them."""
+    import numpy as np
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.fromarray((np.arange(64 * 64, dtype=np.uint16).reshape(64, 64) * 9)).save(buffer, "TIFF")
+    return buffer.getvalue()
+
+
+def stored_files():
+    conn = sqlite3.connect(os.environ["ATLAS_DB_PATH"])
+    try:
+        return conn.execute("SELECT COUNT(*) FROM atlas_file").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def run_files(api, role):
+    from PIL import Image
+
+    for body in (
+        {"key": "y", "label": "Y", "attributes": [{"key": "p", "label": "P", "type": "image", "unique": True}]},
+        {"key": "y", "label": "Y", "attributes": [{"key": "p", "label": "P", "type": "file", "title": True}]},
+    ):
+        api("POST", API, "da", 400, json=body)
+    specimens = {"key": "specimens", "label": "Specimens", "roles": [role["lab_a"], role["quality"]], "attributes": [
+        {"key": "code", "label": "Code", "required": True, "title": True},
+        {"key": "photo", "label": "Photo", "type": "image", "required": True},
+        {"key": "report", "label": "Report", "type": "file"}]}
+    api("POST", API, "da", 201, json=specimens)
+    api("POST", API, "da", 400, json={"key": "views", "label": "Views", "attributes": [   # can't look through an image
+        {"key": "pic", "label": "Pic", "type": "lookthrough", "lookup": "spec.photo"}],
+        "relationships": [{"key": "spec", "label": "Spec", "target": "specimens", "cardinality": "one"}]})
+
+    url = f"{API}/specimens/objects"
+    s1 = api("POST", url, "ua", 201, json={"code": "SP-1"}).json()       # a new object can't carry uploads yet
+    assert s1["photo"] is None and s1["report"] is None, s1
+    api("PATCH", f"{url}/{s1['_id']}", "ua", 400, json={"code": "SP-1b"})   # a change needs the required photo
+    files_url = f"{url}/{s1['_id']}/files"
+
+    def put(user, key, name, data, expect, version=None, files_url=files_url):
+        form = {"_version": str(version)} if version is not None else {}
+        return api("PUT", f"{files_url}/{key}", user, expect, files={"file": (name, data)}, data=form)
+
+    # --- uploads are checked --------------------------------------------------
+    put("ua", "photo", "fake.png", b"not an image", 400)
+    put("ua", "photo", "doc.pdf", b"%PDF-1.4 x", 400)                       # a PDF isn't an image
+    put("ua", "report", "tool.exe", b"MZ\x90\x00", 400)
+    put("ua", "report", "fake.pdf", b"MZ\x90\x00", 400)                     # an .exe renamed to .pdf
+    put("ua", "report", "big.pdf", b"%PDF-" + b"0" * (1024 * 1024), 413)
+    put("ua", "code", "a.png", image_bytes(), 404)                          # not an image or file attribute
+    put("ub", "photo", "a.png", image_bytes(), 404)                         # ub can't see the object
+    put("uq", "photo", "a.png", image_bytes(), 403)                         # uq can read, not change
+
+    # --- images: original, thumbnail, preview; versions ------------------------
+    png = image_bytes((800, 600))
+    obj = put("ua", "photo", "Kırık yüzey.png", png, 200, version=s1["_version"]).json()
+    assert obj["photo"] == {"name": "Kırık yüzey.png", "type": "image/png", "size": len(png),
+                            "width": 800, "height": 600}, obj["photo"]
+    assert obj["_version"] == s1["_version"] + 1 and obj["_updated_by"] == "ua"
+    put("ua", "photo", "b.png", image_bytes(), 409, version=s1["_version"])  # changed meanwhile
+    r = api("GET", f"{files_url}/photo", "uq", 200)
+    assert r.content == png and r.headers["content-type"] == "image/png", r.headers
+    assert r.headers["content-disposition"].startswith("inline;") and "K%C4%B1r%C4%B1k" in r.headers["content-disposition"]
+    assert r.headers["x-content-type-options"] == "nosniff"
+    api("GET", f"{files_url}/photo", "uq", 304, headers={"If-None-Match": r.headers["etag"]})
+    thumb = api("GET", f"{files_url}/photo", "uq", 200, params={"view": "thumb"})
+    assert thumb.headers["content-type"] == "image/jpeg" and max(Image.open(io.BytesIO(thumb.content)).size) == 240
+    assert api("GET", f"{files_url}/photo", "uq", 200, params={"view": "preview"}).content == png   # shown as it is
+    download = api("GET", f"{files_url}/photo", "uq", 200, params={"download": "true"})
+    assert download.headers["content-disposition"].startswith("attachment;")
+    api("GET", f"{files_url}/photo", "ub", 404)
+    obj = put("ua", "photo", "micro.tif", tiff16_bytes(), 200).json()        # replaces the PNG
+    assert obj["photo"]["type"] == "image/tiff", obj["photo"]
+    preview = api("GET", f"{files_url}/photo", "ua", 200, params={"view": "preview"})
+    assert preview.headers["content-type"] == "image/jpeg"                  # browsers can't show TIFF
+    assert stored_files() == 1, stored_files()                             # the PNG it replaced is gone
+
+    # --- files: PDF opens in the browser, Office files download ----------------
+    pdf = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    obj = put("ua", "report", "Rapor.pdf", pdf, 200).json()
+    assert obj["report"] == {"name": "Rapor.pdf", "type": "application/pdf", "size": len(pdf)}, obj["report"]
+    assert api("GET", f"{files_url}/report", "ua", 200).headers["content-disposition"].startswith("inline;")
+    put("ua", "report", "Sonuçlar.xlsx", b"PK\x03\x04" + bytes(100), 200)
+    r = api("GET", f"{files_url}/report", "ua", 200)
+    assert r.headers["content-disposition"].startswith('attachment; filename="Sonuclar.xlsx"'), r.headers
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+    api("GET", f"{files_url}/report", "ua", 404, params={"view": "thumb"})  # only images have thumbnails
+    assert stored_files() == 2
+
+    # --- JSON writes: null clears, what GET returned is left alone, the rest is refused
+    current = api("GET", f"{url}/{s1['_id']}", "ua", 200).json()
+    assert api("PATCH", f"{url}/{s1['_id']}", "ua", 200, json=current).json()["_version"] == current["_version"]
+    api("PATCH", f"{url}/{s1['_id']}", "ua", 400, json={"report": "c:/reports/x.pdf"})
+    api("PATCH", f"{url}/{s1['_id']}", "ua", 400, json={"photo": None})     # required
+    api("DELETE", f"{files_url}/photo", "ua", 400)                          # required: upload another instead
+    assert api("PATCH", f"{url}/{s1['_id']}", "ua", 200, json={"report": None}).json()["report"] is None
+    assert stored_files() == 1
+
+    # --- filters, search and sorting use the file name ------------------------
+    put("ua", "report", "Rapor 2.pdf", pdf, 200)
+    s2 = api("POST", url, "ua", 201, json={"code": "SP-2"}).json()
+    put("ua", "photo", "other.png", image_bytes(), 200, files_url=f"{url}/{s2['_id']}/files")
+
+    def found(params):
+        return ids(api("GET", url, "ua", 200, params=params))
+
+    assert found({"report__isnull": "false"}) == [s1["_id"]]
+    assert found({"photo__contains": "micro"}) == [s1["_id"]]
+    assert found({"q": "rapor"}) == [s1["_id"]]
+    assert found({"report": "Rapor 2.pdf"}) == [s1["_id"]]
+    api("GET", url, "ua", 200, params={"sort": "photo,-report"})
+    api("GET", url, "ua", 400, params={"photo__gt": "a"})
+
+    # --- deleting objects, attributes and classes deletes their files ------------
+    assert stored_files() == 3
+    api("DELETE", f"{url}/{s2['_id']}", "ua", 204)
+    assert stored_files() == 2
+    specimens["attributes"][2]["type"] = "string"                           # report: file -> text
+    r = api("PUT", f"{API}/specimens", "da", 409, json=specimens)
+    assert r.json()["warnings"] == ["Changing 'Report' to text deletes its value in 1 object(s)."], r.json()
+    api("PUT", f"{API}/specimens?force=true", "da", 200, json=specimens)
+    assert stored_files() == 1 and api("GET", f"{url}/{s1['_id']}", "ua", 200).json()["report"] is None
+    api("DELETE", f"{API}/specimens?force=true", "da", 204)
+    assert stored_files() == 0
+
+
 def test_atlas():
     try:
+        make_v1_atlas_db()                   # starting the app must bring it up to date
         with TestClient(app) as client:
+            check_migrated()
             role = seed_portal()
             api = Api(client)
             for username in ("sa", "da", "ua", "ub", "uq", "un", "ux"):
                 api.login(username)
             run(api, role)
+            run_files(api, role)
     finally:
         engine.dispose()
         shutil.rmtree(TMP, ignore_errors=True)

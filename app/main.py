@@ -37,6 +37,19 @@ ActiveUserDep = Annotated[UserRead, Depends(get_current_active_user)]
 # endregion
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Scripts and stylesheets the browser checks again on every load (a quick 304 when
+    nothing changed). Without this, browsers keep an old one for up to a day after it
+    changes, and a page can run new HTML against old JavaScript. Fonts and images keep
+    the browser's usual caching."""
+
+    def file_response(self, full_path, *args, **kwargs):
+        response = super().file_response(full_path, *args, **kwargs)
+        if str(full_path).endswith((".js", ".css")):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 async def lifespan(app: FastAPI):
     # Load the ML model & DB
     init_db()
@@ -56,7 +69,7 @@ StandaloneDocs(app=app)
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
 # Mount static files & templates
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/static", RevalidatedStaticFiles(directory="app/static"), name="static")
 templates = Jinja2Templates(directory="app/templates")
 
 # Mount the embedded Dash data panels (Data Panels module). The mount is guarded

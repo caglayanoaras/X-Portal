@@ -2,7 +2,7 @@
 
 coerce() turns what a client sends (or a value stored under an older type) into
 the stored form of an attribute type. It raises ValueError with a short reason
-("must be a whole number"), which callers prefix with the attribute's label.
+("must be an integer"), which callers prefix with the attribute's label.
 
 Stored forms:
     string, text, choice  str
@@ -37,19 +37,19 @@ def coerce(atype: str, value, options=None):
         return value if isinstance(value, str) else str(value)
     if atype == "int":
         if isinstance(value, bool):
-            raise ValueError("must be a whole number")
+            raise ValueError("must be an integer")
         if isinstance(value, int):
             return value
         if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.replace(" ", "")):
             return int(value.replace(" ", ""))
-        number = _number(value, "must be a whole number")
+        number = _number(value, "must be an integer")
         if not number.is_integer():
-            raise ValueError("must be a whole number")
+            raise ValueError("must be an integer")
         return int(number)
     if atype == "float":
         if isinstance(value, bool):
-            raise ValueError("must be a number")
-        return _number(value, "must be a number")
+            raise ValueError("must be a float")
+        return _number(value, "must be a float")
     if atype == "boolean":
         if isinstance(value, bool):
             return int(value)
@@ -70,6 +70,8 @@ def coerce(atype: str, value, options=None):
         if options and text not in options:
             raise ValueError("must be one of: " + ", ".join(options))
         return text
+    if atype in ("image", "file"):
+        raise ValueError("can only be uploaded (PUT …/files/<attribute>)")
     raise ValueError(f"has an unknown type '{atype}'")
 
 
@@ -87,6 +89,17 @@ def _number(value, reason: str) -> float:
     if not math.isfinite(number):
         raise ValueError(reason)
     return number
+
+
+def parse_number(value) -> float:
+    """Any number, for filters on integer and float fields alike ("1,5" reads as 1.5)."""
+    if isinstance(value, bool):
+        raise ValueError("must be a number")
+    if isinstance(value, str):
+        value = value.strip()
+    if value is None or value == "":
+        raise ValueError("is missing")
+    return _number(value, "must be a number")
 
 
 def parse_date(value) -> str:

@@ -1,16 +1,19 @@
 // Atlas class builder: classes, their attributes, relationships and roles.
 // Everything goes through the Atlas API (PUT replaces a class definition).
-import { api, esc, fmtStamp, renderTree, slugify } from './atlas-common.js';
+import {
+  COLORS, DEFAULT_COLOR, ICONS, api, classIcon, esc, fmtStamp, fold, iconName, renderTree, slugify,
+} from './atlas-common.js';
 
 const root = document.getElementById('atlas-admin');
 const URLS = { classes: root.dataset.urlClasses, roles: root.dataset.urlRoles, browser: root.dataset.urlBrowser };
 const $ = id => document.getElementById(id);
 
 const TYPES = [
-  ['string', 'Text'], ['text', 'Long text'], ['int', 'Whole number'], ['float', 'Number'],
+  ['string', 'Text'], ['text', 'Long text'], ['int', 'Integer'], ['float', 'Float'],
   ['boolean', 'Yes / no'], ['date', 'Date'], ['datetime', 'Date and time'],
-  ['choice', 'Choice'], ['lookthrough', 'Look-through'],
+  ['choice', 'Choice'], ['image', 'Image'], ['file', 'File (PDF / Office)'], ['lookthrough', 'Look-through'],
 ];
+const UPLOADS = ['image', 'file'];
 const SELF = '__self__';   // target option for "this class" while it has no key yet
 
 const MOVE_BUTTONS = `
@@ -26,15 +29,19 @@ class ClassBuilder {
     this.defs = {};         // key -> full definition
     this.roles = [];
     this.key = null;        // the class being edited; null while creating one
+    this.color = '';        // '' = the default grey
+    this.icon = '';         // '' = the default icon
     this.snapshot = '';     // the form as loaded, to notice unsaved changes
     this.rolesSelect = null;
     this.onForce = null;
     this.forceModal = bootstrap.Modal.getOrCreateInstance($('admin-force-modal'));
+    this.renderColors();
     this.bind();
     this.init();
   }
 
   bind() {
+    $('admin-form').addEventListener('submit', e => e.preventDefault());
     $('admin-new').addEventListener('click', () => this.go(null));
     $('admin-tree').addEventListener('click', e => {
       const link = e.target.closest('a[data-key]');
@@ -50,8 +57,37 @@ class ClassBuilder {
       this.forceModal.hide();
       if (this.onForce) this.onForce();
     });
-    $('cls-label').addEventListener('input', () => this.autoKey($('cls-label'), $('cls-key')));
-    $('cls-key').addEventListener('input', () => { $('cls-key').dataset.auto = '0'; });
+    $('cls-label').addEventListener('input', () => { this.autoKey($('cls-label'), $('cls-key')); this.renderHead(); });
+    $('cls-key').addEventListener('input', () => { $('cls-key').dataset.auto = '0'; this.renderHead(); });
+    $('cls-path').addEventListener('input', () => this.renderHead());
+
+    // color: a preset swatch, or the custom one (a native color input)
+    $('cls-colors').addEventListener('click', e => {
+      const swatch = e.target.closest('button[data-color]');
+      if (swatch) this.setColor(swatch.dataset.color);
+    });
+    $('cls-colors').addEventListener('input', e => {
+      if (e.target.matches('input[type=color]')) this.setColor(e.target.value.toLowerCase());
+    });
+
+    // icon: a dropdown with a search box and a grid of icons
+    $('cls-icon-button').addEventListener('shown.bs.dropdown', () => {
+      $('cls-icon-search').value = '';
+      this.renderIcons();
+      $('cls-icon-search').focus();
+    });
+    $('cls-icon-search').addEventListener('input', () => this.renderIcons());
+    $('cls-icon-search').addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      e.preventDefault();
+      const first = $('cls-icon-grid').querySelector('[data-icon]');
+      if (first) this.pickIcon(first.dataset.icon);
+    });
+    $('cls-icon-grid').addEventListener('click', e => {
+      const choice = e.target.closest('[data-icon]');
+      if (choice) this.pickIcon(choice.dataset.icon);
+    });
+    $('cls-icon-default').addEventListener('click', () => this.pickIcon(''));
 
     for (const body of [$('attr-rows'), $('rel-rows')]) {
       body.addEventListener('input', e => {
@@ -122,13 +158,12 @@ class ClassBuilder {
   open(key) {
     this.key = key;
     const def = key ? this.defs[key] : {
-      key: '', label: '', path: '', description: '', roles: [], attributes: [], relationships: [],
+      key: '', label: '', path: '', description: '', color: '', icon: '', roles: [], attributes: [], relationships: [],
     };
     history.replaceState(null, '', key ? `#${key}` : location.pathname);
     $('admin-message').classList.add('d-none');
     $('admin-editor').classList.remove('d-none');
     this.hideMessages();
-    $('admin-title').textContent = key ? def.label : 'New class';
     $('admin-open').classList.toggle('d-none', !key);
     $('admin-open').href = key ? `${URLS.browser}#${key}` : '#';
     $('admin-delete').classList.toggle('d-none', !key);
@@ -140,21 +175,90 @@ class ClassBuilder {
     $('cls-path').value = def.path || '';
     $('cls-description').value = def.description || '';
     this.rolesSelect.setValue((def.roles || []).map(String), true);
+    this.setColor(def.color || '');
+    this.setIcon(def.icon || '');
 
     $('attr-rows').innerHTML = '';
     $('rel-rows').innerHTML = '';
     def.relationships.forEach(r => this.addRelRow(r, false));
     def.attributes.forEach(a => this.addAttrRow(a, false));
     this.changedRows();
-    $('admin-meta').textContent = key
-      ? `Created by ${def.created_by}, ${fmtStamp(def.created_at)} · last changed by ${def.updated_by}, ${fmtStamp(def.updated_at)}`
-      : '';
     this.renderList();
     this.snapshot = JSON.stringify(this.collect());
   }
 
   autoKey(labelInput, keyInput) {
     if (keyInput && !keyInput.readOnly && keyInput.dataset.auto === '1') keyInput.value = slugify(labelInput.value);
+  }
+
+  // The header: folder, icon and label, key and history.
+  renderHead() {
+    const def = this.key ? this.defs[this.key] : null;
+    const path = $('cls-path').value.trim().split('/').map(s => s.trim()).filter(Boolean).join(' / ');
+    const key = $('cls-key').value.trim();
+    $('admin-kicker').textContent = def ? (path || 'Class') : 'New class';
+    $('admin-title-icon').innerHTML = classIcon(this.icon, this.color);
+    $('admin-title').textContent = $('cls-label').value.trim() || (def ? def.label : 'Untitled class');
+    const parts = key ? [`<code>${esc(key)}</code>`] : [];
+    if (def) {
+      parts.push(esc(`Created by ${def.created_by}, ${fmtStamp(def.created_at)}`));
+      parts.push(esc(`last changed by ${def.updated_by}, ${fmtStamp(def.updated_at)}`));
+    }
+    $('admin-sub').innerHTML = parts.join(' · ');
+  }
+
+  // -- color and icon -----------------------------------------------------------
+  renderColors() {
+    const swatches = COLORS.map(([value, name]) => `
+      <button type="button" class="atlas-swatch" data-color="${value}" style="--c:${value || DEFAULT_COLOR}"
+              title="${name}" aria-label="${name}"></button>`);
+    swatches.push(`
+      <label class="atlas-swatch atlas-swatch-custom" title="Another color">
+        <i class="fas fa-plus" aria-hidden="true"></i>
+        <input type="color" value="#21358b" aria-label="Another color">
+      </label>`);
+    $('cls-colors').innerHTML = swatches.join('');
+  }
+
+  setColor(value) {
+    this.color = /^#[0-9a-f]{6}$/.test(value) ? value : '';
+    const preset = COLORS.some(([v]) => v === this.color);
+    for (const swatch of $('cls-colors').querySelectorAll('button[data-color]')) {
+      const on = swatch.dataset.color === this.color;
+      swatch.classList.toggle('selected', on);
+      swatch.setAttribute('aria-pressed', String(on));
+    }
+    const custom = $('cls-colors').querySelector('.atlas-swatch-custom');
+    custom.classList.toggle('selected', !preset);
+    custom.classList.toggle('has-color', !preset);
+    custom.style.setProperty('--c', preset ? '' : this.color);
+    if (!preset) custom.querySelector('input').value = this.color;
+    this.setIcon(this.icon);                   // the icon previews take the color
+  }
+
+  setIcon(icon) {
+    this.icon = /^fa-[a-z0-9-]+$/.test(icon || '') ? icon : '';
+    $('cls-icon-preview').innerHTML = classIcon(this.icon, this.color);
+    $('cls-icon-name').textContent = this.icon ? iconName(this.icon) : 'Default';
+    $('cls-icon-grid').style.setProperty('--c', this.color || DEFAULT_COLOR);
+    this.renderHead();
+  }
+
+  pickIcon(icon) {
+    this.setIcon(icon);
+    bootstrap.Dropdown.getOrCreateInstance($('cls-icon-button')).hide();
+    $('cls-icon-button').focus();
+  }
+
+  renderIcons() {
+    const words = fold($('cls-icon-search').value.trim());
+    const all = this.icon && !ICONS.includes(this.icon) ? [this.icon, ...ICONS] : ICONS;   // keep an API-set icon
+    const shown = all.filter(icon => !words || iconName(icon).includes(words));
+    $('cls-icon-grid').innerHTML = shown.map(icon => `
+      <button type="button" class="atlas-icon-choice ${icon === this.icon ? 'selected' : ''}" data-icon="${esc(icon)}"
+              title="${esc(iconName(icon))}" aria-label="${esc(iconName(icon))}">
+        <i class="fas ${esc(icon)} fa-fw" aria-hidden="true"></i></button>`).join('');
+    $('cls-icon-none').classList.toggle('d-none', shown.length > 0);
   }
 
   // -- rows ------------------------------------------------------------------
@@ -189,9 +293,13 @@ class ClassBuilder {
     row.querySelector('.a-options').classList.toggle('d-none', type !== 'choice');
     row.querySelector('.a-lookup').classList.toggle('d-none', type !== 'lookthrough');
     row.querySelector('.a-none').classList.toggle('d-none', type === 'choice' || type === 'lookthrough');
-    for (const flag of row.querySelectorAll('.a-required, .a-unique')) {
-      flag.disabled = type === 'lookthrough';
-      if (flag.disabled) flag.checked = false;
+    // look-throughs can't be required or unique; images and files can't be unique or part of the title
+    const upload = UPLOADS.includes(type);
+    const off = { '.a-required': type === 'lookthrough', '.a-unique': type === 'lookthrough' || upload, '.a-title': upload };
+    for (const [selector, disabled] of Object.entries(off)) {
+      const flag = row.querySelector(selector);
+      flag.disabled = disabled;
+      if (disabled) flag.checked = false;
     }
   }
 
@@ -233,9 +341,14 @@ class ClassBuilder {
     return value === SELF ? this.currentKey() : value;
   }
 
+  // Rows were added, moved or removed: counts, empty notes, look-through choices.
   changedRows() {
-    $('attr-empty').classList.toggle('d-none', $('attr-rows').children.length > 0);
-    $('rel-empty').classList.toggle('d-none', $('rel-rows').children.length > 0);
+    for (const [kind, rows] of [['attr', $('attr-rows')], ['rel', $('rel-rows')]]) {
+      const n = rows.children.length;
+      $(`${kind}-table`).classList.toggle('d-none', n === 0);
+      $(`${kind}-empty`).classList.toggle('d-none', n > 0);
+      $(`${kind}-count`).textContent = n ? String(n) : '';
+    }
     this.refreshLookups();
   }
 
@@ -249,8 +362,8 @@ class ClassBuilder {
       if (!key || !target) continue;
       const label = row.querySelector('.r-label').value.trim() || key;
       const attrs = target === this.currentKey() ? own : ((this.defs[target] || {}).attributes || []);
-      for (const a of attrs) {
-        if (a.key) choices.push({ value: `${key}.${a.key}`, text: `${label} › ${a.label || a.key}` });
+      for (const a of attrs) {        // images and files can't be looked through
+        if (a.key && !UPLOADS.includes(a.type)) choices.push({ value: `${key}.${a.key}`, text: `${label} › ${a.label || a.key}` });
       }
     }
     for (const select of $('attr-rows').querySelectorAll('.a-lookup')) {
@@ -295,6 +408,8 @@ class ClassBuilder {
       label: $('cls-label').value.trim(),
       path: $('cls-path').value.trim(),
       description: $('cls-description').value.trim(),
+      color: this.color,
+      icon: this.icon,
       roles: (this.rolesSelect ? this.rolesSelect.getValue() : []).map(Number),
       attributes: this.collectAttributes(),
       relationships: [...$('rel-rows').children].map(row => ({
