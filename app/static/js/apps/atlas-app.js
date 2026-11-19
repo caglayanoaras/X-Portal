@@ -2,7 +2,7 @@
 // The grid pages, sorts and filters on the server (AG Grid infinite row model),
 // and the form is built from the class definition. URLs: #class or #class/id.
 import {
-  FILE_TYPES, api, classIcon, esc, fileIcon, fmtLocal, fmtSize, fmtStamp, fold, renderTree, upload,
+  ApiError, FILE_TYPES, api, classIcon, esc, fileIcon, fmtLocal, fmtSize, fmtStamp, fold, renderTree, upload,
 } from './atlas-common.js';
 
 const root = document.getElementById('atlas-app');
@@ -40,6 +40,89 @@ function fmtValue(type, value) {
   return String(value);
 }
 
+const LIST_PAGE = 50;
+
+// Linked objects with a search box, LIST_PAGE at a time: from the row (what an object
+// links to: items) or from the server (what links to it, maybe thousands: fetchPage).
+class LinkList {
+  constructor({ input, list, display, items = null, fetchPage = null, onTotal = () => {} }) {
+    Object.assign(this, { input, list, display, local: items, fetchPage, onTotal });
+    this.token = 0;
+    let timer;
+    this.onInput = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => this.reset(), this.local ? 0 : 250);
+    };
+    this.onClick = e => {
+      if (!e.target.closest('[data-more]')) return;
+      e.preventDefault();
+      this.more();
+    };
+    input.addEventListener('input', this.onInput);
+    list.addEventListener('click', this.onClick);
+    this.reset();
+  }
+
+  destroy() {
+    this.token += 1;                                  // answers still on their way are dropped
+    this.input.removeEventListener('input', this.onInput);
+    this.list.removeEventListener('click', this.onClick);
+  }
+
+  reset() {
+    Object.assign(this, { query: this.input.value.trim(), items: [], total: null, page: 0, error: '' });
+    this.more();
+  }
+
+  async more() {
+    const token = ++this.token;
+    if (this.local) {
+      const words = fold(this.query).split(/\s+/).filter(Boolean);
+      const matching = this.local.filter(i => words.every(w => fold(`${i._title} #${i._id}`).includes(w)));
+      this.page += 1;
+      Object.assign(this, { total: matching.length, items: matching.slice(0, this.page * LIST_PAGE) });
+    } else {
+      this.loading = true;
+      this.render();
+      try {
+        const result = await this.fetchPage(this.query, this.page + 1);
+        if (token !== this.token) return;              // a newer search has started
+        this.page += 1;
+        Object.assign(this, { items: this.items.concat(result.items), total: result.total, error: '' });
+      } catch (e) {
+        if (token !== this.token) return;
+        this.error = e.message;
+      }
+      this.loading = false;
+    }
+    this.render();
+  }
+
+  render() {
+    const d = this.display;
+    let html = this.items.map(i => `
+      <li class="list-group-item p-0">
+        <a class="atlas-link-item" href="#${esc(d.cls)}/${esc(i._id)}">
+          ${classIcon(d.icon, d.color)}
+          <span class="flex-grow-1">${esc(i._title)}</span>
+          <span class="text-muted small">${esc(d.classLabel)} #${esc(i._id)}</span>
+        </a>
+      </li>`).join('');
+    if (this.error) html += `<li class="list-group-item text-danger small">${esc(this.error)}</li>`;
+    else if (!this.items.length) {
+      html += `<li class="list-group-item text-muted">${this.loading ? 'Loading…' : this.query ? 'No matches.' : 'Nothing linked.'}</li>`;
+    }
+    if (!this.error && this.total != null && this.items.length < this.total) {
+      html += `<li class="list-group-item atlas-more">
+        <span class="text-muted small">${this.items.length.toLocaleString()} of ${this.total.toLocaleString()}</span>
+        <button type="button" class="btn btn-link btn-sm p-0" data-more ${this.loading ? 'disabled' : ''}>
+          ${this.loading ? 'Loading…' : 'Show more'}</button></li>`;
+    }
+    this.list.innerHTML = html;
+    if (!this.query && this.total != null) this.onTotal(this.total);
+  }
+}
+
 class AtlasBrowser {
   constructor() {
     this.classes = [];
@@ -67,6 +150,14 @@ class AtlasBrowser {
       timer = setTimeout(() => { this.search = e.target.value.trim(); this.reloadGrid(); }, 300);
     });
     $('atlas-new').addEventListener('click', () => this.openForm(null));
+    for (const item of document.querySelectorAll('[data-export]')) {
+      item.addEventListener('click', () => this.exportTable(item.dataset.export));
+    }
+    // "Linked from" in the form: the first few, and the whole list (searchable) on request.
+    $('atlas-object-incoming').addEventListener('click', e => {
+      const button = e.target.closest('[data-show-all]');
+      if (button) this.showAllIncoming(button);
+    });
     $('atlas-object-save').addEventListener('click', () => this.save());
     $('atlas-object-delete').addEventListener('click', () => { if (this.editing) this.remove(this.editing._id); });
     // A linked object in the links list: close the list first, then open the object.
@@ -83,6 +174,7 @@ class AtlasBrowser {
     $('atlas-object-modal').addEventListener('hidden.bs.modal', () => {
       for (const select of Object.values(this.selects)) select.destroy();
       this.selects = {};
+      this.dropInlineLists();
       this.dropFileChanges();
       this.editing = null;
       if (this.pendingRoute) {
@@ -116,7 +208,7 @@ class AtlasBrowser {
   renderTree() {
     const filter = fold($('atlas-tree-filter').value.trim());
     const shown = this.classes.filter(c => !filter || fold(`${c.label} ${c.path}`).includes(filter));
-    renderTree($('atlas-tree'), shown, this.cls && this.cls.key, c => `#${c.key}`);
+    renderTree($('atlas-tree'), shown, this.cls && this.cls.key, c => `#${c.key}`, { searching: !!filter });
   }
 
   // #class or #class/id
@@ -375,69 +467,105 @@ class AtlasBrowser {
   // What this object links to: the titles are already in the row.
   showLinks(rel, value) {
     const items = this.linked(value).map(v => (v && typeof v === 'object' ? v : { _id: v, _title: `#${v}` }));
-    this.openLinks({ label: rel.label, cls: rel.target, classLabel: rel.target_label,
-                     icon: rel.target_icon, color: rel.target_color, items, total: items.length });
+    this.openLinks(rel.label, { cls: rel.target, classLabel: rel.target_label, icon: rel.target_icon,
+                                color: rel.target_color }, { items });
   }
 
-  // What links to this object: asked from the other class (only objects you can read).
-  async showIncoming(rel, id) {
-    const spec = { label: rel.label, cls: rel.class, classLabel: rel.class_label, icon: rel.icon, color: rel.color,
-                   items: null, total: null };
-    this.openLinks(spec);
-    const qs = new URLSearchParams({ [rel.relationship]: id, fields: '_title', sort: '_title', page_size: 1000 });
-    try {
-      const result = await api(`${this.objectsUrl(rel.class)}?${qs}`);
-      Object.assign(spec, { items: result.items, total: result.total });
-    } catch (e) {
-      Object.assign(spec, { items: [], total: 0, error: e.message });
-    }
-    if (this.links === spec) this.renderLinks();
+  // What links to this object: from the other class, a page at a time (only objects you can read).
+  showIncoming(rel, id) {
+    this.openLinks(rel.label, this.incomingDisplay(rel), { fetchPage: this.incomingPages(rel, id) });
   }
 
-  openLinks(spec) {
-    this.links = spec;
+  incomingDisplay(rel) {
+    return { cls: rel.class, classLabel: rel.class_label, icon: rel.icon, color: rel.color };
+  }
+
+  incomingPages(rel, id) {
+    return (query, page) => {
+      const qs = new URLSearchParams({ [rel.relationship]: id, fields: '_title', sort: '_title', page,
+                                       page_size: LIST_PAGE });
+      if (query) qs.set('q', query);
+      return api(`${this.objectsUrl(rel.class)}?${qs}`);
+    };
+  }
+
+  openLinks(label, display, source) {
     let search = document.getElementById('atlas-links-search');
     if (!search) {                        // the modal is shared with other pages, so the box is added here
-      search = document.createElement('input');
-      Object.assign(search, { type: 'search', id: 'atlas-links-search', placeholder: 'Search',
-                              className: 'form-control form-control-sm mb-2', autocomplete: 'off' });
-      search.setAttribute('aria-label', 'Search the list');
-      search.addEventListener('input', () => this.renderLinks());
+      search = this.searchBox('atlas-links-search');
       $('linksList').before(search);
       $('showLinksModal').addEventListener('shown.bs.modal', () => search.focus());
     }
     search.value = '';
-    this.renderLinks();
+    if (this.linkList) this.linkList.destroy();
+    const title = $('showLinksModal').querySelector('.modal-title');
+    title.textContent = label;
+    this.linkList = new LinkList({ input: search, list: $('linksList'), display, ...source,
+                                   onTotal: total => { title.textContent = `${label} (${total.toLocaleString()})`; } });
     bootstrap.Modal.getOrCreateInstance($('showLinksModal')).show();
   }
 
-  renderLinks() {
-    const s = this.links;
-    if (!s) return;
-    $('showLinksModal').querySelector('.modal-title').textContent =
-      s.total == null ? s.label : `${s.label} (${s.total})`;
-    if (!s.items) {
-      $('linksList').innerHTML = '<li class="list-group-item text-muted">Loading…</li>';
-      return;
+  searchBox(id) {
+    const box = document.createElement('input');
+    Object.assign(box, { type: 'search', placeholder: 'Search', autocomplete: 'off',
+                         className: 'form-control form-control-sm mb-2' });
+    if (id) box.id = id;
+    box.setAttribute('aria-label', 'Search the list');
+    return box;
+  }
+
+  // -- export ----------------------------------------------------------------------
+  // The grid as it stands: its search, filters, sort and column order. Relationship
+  // columns go in whether shown or not ("title (#id)"); reverse links as counts.
+  tableQuery() {
+    const qs = new URLSearchParams();
+    if (this.search) qs.set('q', this.search);
+    const sort = this.grid.getColumnState().filter(s => s.sort)
+      .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0))
+      .map(s => (s.sort === 'desc' ? '-' : '') + s.colId).join(',');
+    if (sort) qs.set('sort', sort);
+    this.addFilters(qs, this.grid.getFilterModel());
+    return qs;
+  }
+
+  exportColumns() {
+    const links = new Set(this.cls.relationships.map(r => r.key));
+    return this.grid.getColumnState()
+      .filter(s => s.colId !== '_actions' && (!s.hide || links.has(s.colId)))
+      .map(s => s.colId);
+  }
+
+  async exportTable(format) {
+    const button = $('atlas-export');
+    const label = button.querySelector('span');
+    const qs = this.tableQuery();
+    qs.set('fields', this.exportColumns().join(','));
+    if (this.incomingLinks().length) qs.set('incoming_counts', 'true');
+    qs.set('_tz', Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
+    button.disabled = true;
+    label.textContent = 'Exporting…';
+    $('atlas-grid-error').classList.add('d-none');
+    try {
+      const r = await fetch(`${this.objectsUrl()}.${format}?${qs}`);
+      if (!r.ok) {
+        let body = null;
+        try { body = await r.json(); } catch (e) { /* not JSON */ }
+        throw new ApiError(r.status, body);
+      }
+      const named = /filename\*=UTF-8''([^;]+)/i.exec(r.headers.get('content-disposition') || '');
+      const url = URL.createObjectURL(await r.blob());
+      const link = Object.assign(document.createElement('a'),
+                                 { href: url, download: named ? decodeURIComponent(named[1]) : `${this.cls.label}.${format}` });
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      this.notice(e.message);
+    } finally {
+      button.disabled = false;
+      label.textContent = 'Export';
     }
-    const words = fold($('atlas-links-search').value).split(/\s+/).filter(Boolean);
-    const shown = s.items.filter(i => words.every(w => fold(`${i._title} #${i._id}`).includes(w)));
-    let html = shown.map(i => `
-      <li class="list-group-item p-0">
-        <a class="atlas-link-item" href="#${esc(s.cls)}/${esc(i._id)}">
-          ${classIcon(s.icon, s.color)}
-          <span class="flex-grow-1">${esc(i._title)}</span>
-          <span class="text-muted small">${esc(s.classLabel)} #${esc(i._id)}</span>
-        </a>
-      </li>`).join('');
-    if (!shown.length) {
-      const empty = s.error || (s.items.length ? 'No matches.' : 'Nothing linked.');
-      html = `<li class="list-group-item text-muted">${esc(empty)}</li>`;
-    }
-    if (s.total > s.items.length) {
-      html += `<li class="list-group-item text-muted small">The first ${s.items.length} of ${s.total} are listed.</li>`;
-    }
-    $('linksList').innerHTML = html;
   }
 
   go(id) {
@@ -550,6 +678,7 @@ class AtlasBrowser {
     for (const r of c.relationships) this.initLinkSelect(r, obj ? obj[r.key] : null, canEdit);
     if (IS_ADMIN) this.initRolesSelect(obj ? obj._roles : [], canEdit);
 
+    this.dropInlineLists();
     $('atlas-object-incoming').innerHTML = obj ? this.incomingHtml(obj._incoming || []) : '';
     $('atlas-object-meta').textContent = obj
       ? `Created by ${obj._created_by}, ${fmtStamp(obj._created_at)} · last changed by ${obj._updated_by}, `
@@ -678,10 +807,43 @@ class AtlasBrowser {
 
   incomingHtml(groups) {
     if (!groups.length) return '';
-    return '<hr><div class="small text-muted mb-2">Linked from</div>' + groups.map(g => `
-      <div class="mb-2 small"><span class="me-2">${esc(g.label)}</span>${g.items.map(i =>
-        `<a class="badge text-bg-light border text-decoration-none me-1" href="#${esc(g.class)}/${i._id}">${esc(i._title)}</a>`
-      ).join('')}</div>`).join('');
+    this.incomingGroups = groups;
+    return '<hr><div class="small text-muted mb-2">Linked from</div>' + groups.map((g, n) => {
+      const count = g.count ?? g.items.length;
+      return `
+      <div class="atlas-incoming-group mb-2 small" data-group="${n}">
+        <span class="me-1">${esc(g.label)}</span><span class="text-muted me-2">${count.toLocaleString()}</span>
+        <span class="atlas-incoming-items">${g.items.map(i =>
+          `<a class="badge text-bg-light border text-decoration-none me-1" href="#${esc(g.class)}/${i._id}">${esc(i._title)}</a>`
+        ).join('')}${count > g.items.length
+          ? `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-show-all="${n}">Show all ${count.toLocaleString()}</button>`
+          : ''}</span>
+      </div>`;
+    }).join('');
+  }
+
+  // Swap a group's first few badges for the whole list: searchable, a page at a time.
+  showAllIncoming(button) {
+    const group = button.closest('[data-group]');
+    const g = this.incomingGroups[Number(group.dataset.group)];
+    const rel = (this.cls.incoming || []).find(r => r.class === g.class && r.relationship === g.relationship)
+      || { class: g.class, class_label: g.class_label, relationship: g.relationship, icon: '', color: '' };
+    const box = document.createElement('div');
+    box.className = 'atlas-inline-links';
+    const search = this.searchBox();
+    const list = document.createElement('ul');
+    list.className = 'list-group atlas-inline-list';
+    box.append(search, list);
+    group.querySelector('.atlas-incoming-items').replaceWith(box);
+    this.inlineLists = this.inlineLists || [];
+    this.inlineLists.push(new LinkList({ input: search, list, display: this.incomingDisplay(rel),
+                                         fetchPage: this.incomingPages(rel, this.editing._id) }));
+    search.focus();
+  }
+
+  dropInlineLists() {
+    for (const list of this.inlineLists || []) list.destroy();
+    this.inlineLists = [];
   }
 
   // -- image and file fields in the form ----------------------------------------

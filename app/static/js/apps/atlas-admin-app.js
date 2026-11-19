@@ -1,7 +1,7 @@
 // Atlas class builder: classes, their attributes, relationships and roles.
 // Everything goes through the Atlas API (PUT replaces a class definition).
 import {
-  COLORS, DEFAULT_COLOR, ICONS, api, classIcon, esc, fmtStamp, fold, iconName, renderTree, slugify,
+  COLORS, DEFAULT_COLOR, ICONS, api, classIcon, esc, fmtStamp, fold, folderPaths, iconName, renderTree, slugify,
 } from './atlas-common.js';
 
 const root = document.getElementById('atlas-admin');
@@ -137,8 +137,8 @@ class ClassBuilder {
     this.classes = classes;
     const defs = await Promise.all(classes.map(c => api(`${URLS.classes}/${encodeURIComponent(c.key)}`)));
     this.defs = Object.fromEntries(defs.map(d => [d.key, d]));
-    const paths = [...new Set(classes.map(c => c.path).filter(Boolean))].sort();
-    $('admin-paths').innerHTML = paths.map(p => `<option value="${esc(p)}">`).join('');
+    // every existing folder, parents included, so a new class can go next to existing ones
+    $('admin-paths').innerHTML = folderPaths(classes).map(p => `<option value="${esc(p)}">`).join('');
   }
 
   async reload() {

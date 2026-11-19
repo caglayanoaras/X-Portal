@@ -144,30 +144,105 @@ export function classIcon(icon, color, extra = '') {
   return `<i class="fas ${name} fa-fw atlas-icon ${extra}" style="--c:${tint}" aria-hidden="true"></i>`;
 }
 
-// [{path, classes}] with top-level classes first, then folders by name.
-export function groupByPath(classes) {
-  const groups = new Map();
+// -- the class tree ---------------------------------------------------------------
+// A class's folder is a path such as "Depo/Hammadde": a folder Depo holding a folder
+// Hammadde holding the class. Folders exist only through the classes in them, and
+// names match without regard to case or Turkish letters (the first spelling is shown).
+
+// {folders: Map(folded name -> folder), classes: [...]} with folder = {name, id, folders, classes}.
+export function folderTree(classes) {
+  const root = { folders: new Map(), classes: [] };
   for (const c of classes) {
-    if (!groups.has(c.path)) groups.set(c.path, []);
-    groups.get(c.path).push(c);
+    let node = root;
+    let id = '';
+    for (const part of String(c.path || '').split('/').map(s => s.trim()).filter(Boolean)) {
+      const key = fold(part);
+      id = id ? `${id}/${key}` : key;
+      if (!node.folders.has(key)) node.folders.set(key, { name: part, id, folders: new Map(), classes: [] });
+      node = node.folders.get(key);
+    }
+    node.classes.push(c);
   }
-  return [...groups.entries()]
-    .sort(([a], [b]) => (a === '' ? -1 : b === '' ? 1 : a.localeCompare(b, 'tr')))
-    .map(([path, list]) => ({ path, classes: list.sort((x, y) => x.label.localeCompare(y.label, 'tr')) }));
+  return root;
 }
 
-// The class list in the sidebar (folders as small headings).
-export function renderTree(container, classes, activeKey, href) {
-  const groups = groupByPath(classes);
-  if (!groups.length) {
-    container.innerHTML = '<div class="text-muted small px-2 py-3">No classes.</div>';
+// Every folder path that holds a class, parents included ("Depo", "Depo/Hammadde"), sorted.
+export function folderPaths(classes) {
+  const paths = [];
+  const walk = (node, prefix) => {
+    for (const f of sortedFolders(node)) {
+      const path = prefix ? `${prefix}/${f.name}` : f.name;
+      paths.push(path);
+      walk(f, path);
+    }
+  };
+  walk(folderTree(classes), '');
+  return paths;
+}
+
+const byName = (a, b) => a.localeCompare(b, 'tr', { sensitivity: 'base' });
+const sortedFolders = node => [...node.folders.values()].sort((a, b) => byName(a.name, b.name));
+
+// Which folders this browser keeps closed (folded folder ids); every folder starts open.
+const CLOSED_KEY = 'atlas.closedFolders';
+
+function closedFolders() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(CLOSED_KEY) || '[]'));
+  } catch (e) {
+    return new Set();
+  }
+}
+
+function keepClosed(id, closed) {
+  const ids = closedFolders();
+  if (closed) ids.add(id);
+  else ids.delete(id);
+  try { localStorage.setItem(CLOSED_KEY, JSON.stringify([...ids])); } catch (e) { /* storage off: not remembered */ }
+}
+
+// The sidebar: folders first, then classes, at every level. The folders around the
+// active class are always open; while searching, every folder with a match is.
+export function renderTree(container, classes, activeKey, href, { searching = false } = {}) {
+  if (!classes.length) {
+    container.innerHTML = `<div class="text-muted small px-2 py-3">${searching ? 'No class matches.' : 'No classes.'}</div>`;
     return;
   }
-  container.innerHTML = groups.map(g => `
-    ${g.path ? `<div class="atlas-folder"><i class="fas fa-folder me-1"></i>${esc(g.path.split('/').join(' / '))}</div>` : ''}
-    ${g.classes.map(c => `
-      <a href="${esc(href(c))}" data-key="${esc(c.key)}"
-         class="list-group-item list-group-item-action ${g.path ? 'nested' : ''} ${c.key === activeKey ? 'active' : ''}">
-        ${classIcon(c.icon, c.color)}<span>${esc(c.label)}</span>
-      </a>`).join('')}`).join('');
+  const closed = searching ? new Set() : closedFolders();
+  const active = classes.find(c => c.key === activeKey);
+  const activeFolders = new Set();
+  if (active) {
+    let id = '';
+    for (const part of String(active.path || '').split('/').map(s => s.trim()).filter(Boolean)) {
+      id = id ? `${id}/${fold(part)}` : fold(part);
+      activeFolders.add(id);
+    }
+  }
+  const level = (node, depth) => sortedFolders(node).map(f => `
+      <details class="atlas-node" data-folder="${esc(f.id)}" ${closed.has(f.id) && !activeFolders.has(f.id) ? '' : 'open'}>
+        <summary class="atlas-row" style="--depth:${depth}">
+          <i class="fas fa-chevron-right atlas-chevron" aria-hidden="true"></i>
+          <i class="fas fa-folder fa-fw atlas-folder-icon atlas-folder-shut" aria-hidden="true"></i>
+          <i class="fas fa-folder-open fa-fw atlas-folder-icon atlas-folder-opened" aria-hidden="true"></i>
+          <span class="atlas-row-label">${esc(f.name)}</span>
+        </summary>
+        ${level(f, depth + 1)}
+      </details>`).join('')
+    + [...node.classes].sort((a, b) => byName(a.label, b.label)).map(c => `
+      <a href="${esc(href(c))}" data-key="${esc(c.key)}" class="atlas-row ${c.key === activeKey ? 'active' : ''}"
+         style="--depth:${depth}" ${c.key === activeKey ? 'aria-current="page"' : ''}>
+        <span class="atlas-chevron" aria-hidden="true"></span>
+        ${classIcon(c.icon, c.color)}<span class="atlas-row-label">${esc(c.label)}</span>
+      </a>`).join('');
+  container.innerHTML = level(folderTree(classes), 0);
+
+  if (!container.dataset.treeBound) {        // remember what the person opens and closes
+    container.dataset.treeBound = '1';
+    container.addEventListener('click', e => {
+      const summary = e.target.closest('summary');
+      if (!summary || !container.contains(summary)) return;
+      const node = summary.parentElement;
+      keepClosed(node.dataset.folder, node.open);   // the click is about to flip node.open
+    });
+  }
 }

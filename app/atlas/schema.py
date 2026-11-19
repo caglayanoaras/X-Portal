@@ -23,7 +23,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from app.atlas.db import transaction
+from app.atlas.db import fold, transaction
 from app.atlas.errors import AtlasError
 from app.atlas.values import coerce, role_ids
 
@@ -449,9 +449,29 @@ def _count(conn, sql: str, args=()) -> int:
     return conn.execute(sql, args).fetchone()[0]
 
 
+def match_folders(path: str, schema: Schema, skip: AtlasClass | None = None) -> str:
+    """A folder path spelled as the folders that already exist: with "Depo/Hammadde"
+    in use, "depo/HAMMADDE/Kimyasal" becomes "Depo/Hammadde/Kimyasal". Folder names
+    match without regard to case or Turkish letters, so a typo can't split a folder."""
+    if not path:
+        return path
+    known = {}                   # (folded parents, folded name) -> the spelling in use
+    for other in schema.classes.values():
+        if other is skip or not other.path:
+            continue
+        parts = other.path.split("/")
+        for i, part in enumerate(parts):
+            known.setdefault((tuple(fold(p) for p in parts[:i]), fold(part)), part)
+    spelled = []
+    for part in path.split("/"):
+        spelled.append(known.get((tuple(fold(p) for p in spelled), fold(part)), part))
+    return "/".join(spelled)
+
+
 def create_class(conn, schema: Schema, cls: AtlasClass, user: str) -> None:
     if cls.key in schema.classes:
         raise AtlasError(409, f"A class with the key '{cls.key}' already exists.")
+    cls.path = match_folders(cls.path, schema)
     _validate(Schema([*schema.classes.values(), cls]))
     now = utc_now()
     with transaction(conn):
@@ -478,6 +498,7 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
     """
     old = schema.get(cls.key)
     cls.id = old.id
+    cls.path = match_folders(cls.path, schema, skip=old)
     new_schema = Schema([c for c in schema.classes.values() if c is not old] + [cls])
     _validate(new_schema)
 

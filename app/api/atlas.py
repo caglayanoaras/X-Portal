@@ -11,6 +11,7 @@ session cookie, or `Authorization: Bearer <token>` from POST /auth/token.
     PUT    /atlas/api/classes/{class}[?force=true]       replace it              (admins)
     DELETE /atlas/api/classes/{class}[?force=true]       delete it               (admins)
     GET    /atlas/api/classes/{class}/objects            list, filter, search, sort, page
+    GET    /atlas/api/classes/{class}/objects.xlsx       the same objects as an Excel file (.csv: CSV)
     POST   /atlas/api/classes/{class}/objects            create an object
     GET    /atlas/api/classes/{class}/objects/{id}       one object
     PATCH  /atlas/api/classes/{class}/objects/{id}       change some fields
@@ -31,7 +32,7 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
 from app.atlas import db as atlas_db
-from app.atlas import files
+from app.atlas import export, files
 from app.atlas.errors import AtlasError
 from app.atlas.objects import (PAGE_SIZE, PAGE_SIZE_MAX, class_visible, create_object, delete_object,
                                get_file, get_object, list_objects, set_file, update_object, upload_attribute)
@@ -229,6 +230,35 @@ def api_objects(
         cls = schema.get(class_key)
         return list_objects(conn, schema, cls, viewer, filters, text=q, sort=sort, page=page,
                             page_size=page_size, expand=expand, fields=fields, incoming_counts=incoming_counts)
+
+
+@atlas_router.get("/api/classes/{class_key}/objects.{fmt}", name="atlas_api_export")
+def api_export(
+    class_key: str,
+    fmt: str,
+    request: Request,
+    current_user: ActiveUserDep,
+    db: SessionDep,
+    q: str | None = Query(None, description="Search, as for the list."),
+    sort: str | None = Query(None, description="Sort, as for the list."),
+    fields: str | None = Query(None, description="The columns, in order (comma list); everything when left out."),
+    incoming_counts: bool = Query(False, description="Add a column per relationship pointing here: "
+                                                     "how many objects link to each one."),
+    tz: str | None = Query(None, alias="_tz", description="Time zone for Created and Updated, e.g. Europe/Istanbul."),
+):
+    """Download the objects the list would give (the same filters, search and sort, no
+    pages) as an Excel file (objects.xlsx) or a CSV file (objects.csv). Linked objects
+    are written as "title (#id)". At most 100,000 objects per export."""
+    viewer = viewer_for(current_user)
+    filters = [(k, v) for k, v in request.query_params.multi_items() if k not in RESERVED_KEYS and k != "_tz"]
+    role_names = {r.id: r.rolename for r in db.exec(select(UserRole)).all()}
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        body, media, name = export.build(conn, schema, schema.get(class_key), viewer, filters, fmt=fmt, text=q,
+                                         sort=sort, fields=fields, incoming_counts=incoming_counts, tz=tz,
+                                         role_names=role_names)
+    return Response(content=body, media_type=media, headers={
+        "Content-Disposition": files.content_disposition(name, inline=False), "Cache-Control": "no-store"})
 
 
 @atlas_router.post("/api/classes/{class_key}/objects", name="atlas_api_create_object",

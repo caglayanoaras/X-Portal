@@ -474,21 +474,52 @@ def list_objects(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, filters,
     return {"items": items, "total": total, "page": page, "page_size": page_size}
 
 
+INCOMING_PREVIEW = 20      # linking objects a single object read lists per relationship
+
+
+def count_objects(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, filters, *, text=None) -> int:
+    where, args = Query(schema, cls, viewer).where(filters, text)
+    return conn.execute(f"SELECT COUNT(*) FROM {q(cls.table)} s WHERE {where}", args).fetchone()[0]
+
+
+def iter_objects(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, filters, *, text=None, sort=None,
+                 expand=None, incoming_counts: bool = False, chunk: int = 1000):
+    """Every object the list would give (filters, search, sort; no pages), as lists of
+    API items of up to `chunk` objects, so an export never holds all rows at once."""
+    query = Query(schema, cls, viewer)
+    where, args = query.where(filters, text)
+    select_sql, select_args = query.select(None, incoming_counts=incoming_counts)
+    cursor = conn.execute(f"SELECT {select_sql} FROM {q(cls.table)} s WHERE {where} "
+                          f"ORDER BY {query.order_by(sort or '_id')}", [*select_args, *args])
+    while True:
+        rows = cursor.fetchmany(chunk)
+        if not rows:
+            return
+        items = [query.to_api(row) for row in rows]
+        query.expand(conn, items, expand)
+        yield items
+
+
 def _incoming(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_id: int) -> list:
-    """Objects (that the viewer can read) linking to this one, grouped by relationship."""
+    """Objects (that the viewer can read) linking to this one, grouped by relationship:
+    each group's count and its first INCOMING_PREVIEW items. A test type can have
+    thousands of results; page through them all with the list API and the
+    relationship as a filter (GET /classes/<source>/objects?<relationship>=<id>)."""
     groups = []
     for rel in schema.incoming(cls):
         source = rel.cls
         read, read_args = row_filter(viewer, source, "read", "s")
+        linking = (f'FROM {q(rel.link_table)} k JOIN {q(source.table)} s ON s."_id" = k.source_id '
+                   f'WHERE k.target_id = ? AND ({read})')
+        count = conn.execute(f"SELECT COUNT(*) {linking}", [object_id, *read_args]).fetchone()[0]
+        if not count:
+            continue
         title = Query(schema, source, viewer).title(source, "s")
-        rows = conn.execute(
-            f'SELECT s."_id", {title} FROM {q(rel.link_table)} k JOIN {q(source.table)} s '
-            f'ON s."_id" = k.source_id WHERE k.target_id = ? AND ({read}) ORDER BY s."_id"',
-            [object_id, *read_args]).fetchall()
-        if rows:
-            groups.append({"class": source.key, "class_label": source.label, "relationship": rel.key,
-                           "label": rel.reverse_label or f"{source.label} › {rel.label}",
-                           "items": [{"_id": row[0], "_title": row[1]} for row in rows]})
+        rows = conn.execute(f'SELECT s."_id", {title} {linking} ORDER BY s."_id" LIMIT ?',
+                            [object_id, *read_args, INCOMING_PREVIEW]).fetchall()
+        groups.append({"class": source.key, "class_label": source.label, "relationship": rel.key,
+                       "label": rel.reverse_label or f"{source.label} › {rel.label}", "count": count,
+                       "items": [{"_id": row[0], "_title": row[1]} for row in rows]})
     return groups
 
 

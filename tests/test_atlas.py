@@ -297,9 +297,9 @@ def run(api, role):
         ("Receiving test of", [b1["_id"]]), ("Retest of", [b2["_id"]]), ("Retests", [t2["_id"]])], incoming
     incoming = api("GET", f"{tests_url}/{t1['_id']}", "uq", 200).json()["_incoming"]   # can't read S-2
     assert incoming == [{"class": "batches", "class_label": "Batches", "relationship": "receiving_tests",
-                         "label": "Receiving test of", "items": [{"_id": b1["_id"], "_title": "B-1"}]},
+                         "label": "Receiving test of", "count": 1, "items": [{"_id": b1["_id"], "_title": "B-1"}]},
                         {"class": "batches", "class_label": "Batches", "relationship": "retests",
-                         "label": "Retest of", "items": [{"_id": b2["_id"], "_title": "B-2"}]}]
+                         "label": "Retest of", "count": 1, "items": [{"_id": b2["_id"], "_title": "B-2"}]}]
 
     # the reverse side in lists: per incoming relationship, how many readable objects link here
     def counts(user):
@@ -371,6 +371,15 @@ def run(api, role):
     api("DELETE", f"/users_and_permissions/userroles/{role['lab_b']}", "sa", 204)
     assert api("GET", f"{API}/tests", "da", 200).json()["roles"] == [role["lab_a"]]
     assert api("GET", f"{tests_url}/{t1['_id']}", "da", 200).json()["_roles"] == [role["quality"]]
+
+    # --- folders: a name matches whatever its case or Turkish letters ------------
+    api("POST", API, "da", 201, json={"key": "notes", "label": "Notes", "path": "Kalite Güvence / Raporlar"})
+    memos = {"key": "memos", "label": "Memos", "path": "KALİTE GÜVENCE/raporlar/Eski"}
+    assert api("POST", API, "da", 201, json=memos).json()["path"] == "Kalite Güvence/Raporlar/Eski"
+    memos["path"] = "LAB/qc"
+    assert api("PUT", f"{API}/memos", "da", 200, json=memos).json()["path"] == "Lab/QC"
+    for key in ("notes", "memos"):
+        api("DELETE", f"{API}/{key}", "da", 204)
 
     # --- deleting classes --------------------------------------------------------
     api("DELETE", f"{API}/labs", "da", 409)                                # locations link to labs
@@ -519,6 +528,91 @@ def run_files(api, role):
     assert stored_files() == 0
 
 
+def run_export(api):
+    import csv
+    import datetime
+    import time
+
+    import openpyxl
+
+    from app.atlas.export import CELL_MAX, Cells
+
+    api("POST", API, "da", 201, json={"key": "test_types", "label": "Test types", "attributes": [
+        {"key": "name", "label": "Name", "required": True, "title": True}]})
+    api("POST", API, "da", 201, json={"key": "test_results", "label": "Test results", "attributes": [
+        {"key": "sample", "label": "Sample", "title": True},
+        {"key": "value", "label": "Value", "type": "float"},
+        {"key": "tested", "label": "Tested", "type": "datetime"},
+        {"key": "passed", "label": "Passed", "type": "boolean"},
+        {"key": "note", "label": "Note"}],
+        "relationships": [
+            {"key": "type", "label": "Type", "target": "test_types", "cardinality": "one", "reverse_label": "Results"},
+            {"key": "related", "label": "Related", "target": "test_results"}]})
+    types_url, results_url = f"{API}/test_types/objects", f"{API}/test_results/objects"
+    tensile = api("POST", types_url, "ua", 201, json={"name": "Tensile"}).json()
+    shear = api("POST", types_url, "ua", 201, json={"name": "Shear"}).json()
+
+    # --- 5,000 results of one test type -----------------------------------------
+    conn = sqlite3.connect(os.environ["ATLAS_DB_PATH"])
+    stamp = "2026-11-19T07:00:00Z"
+    with conn:
+        for n in range(5000):
+            row = conn.execute('INSERT INTO obj_test_results ("_roles", "_created_at", "_created_by", "_updated_at", '
+                               '"_updated_by", "_version", "sample", "value") VALUES (?,?,?,?,?,?,?,?)',
+                               ("[]", stamp, "seed", stamp, "seed", 1, f"R-{n:04d}", n / 10)).lastrowid
+            conn.execute('INSERT INTO "link_test_results__type" (source_id, target_id) VALUES (?, ?)',
+                         (row, tensile["_id"]))
+    conn.close()
+    started = time.perf_counter()
+    group = api("GET", f"{types_url}/{tensile['_id']}", "ua", 200).json()["_incoming"][0]
+    assert time.perf_counter() - started < 3, "reading a type with 5,000 results should stay quick"
+    assert (group["label"], group["count"], len(group["items"])) == ("Results", 5000, 20), group
+    counts = api("GET", types_url, "ua", 200, params={"incoming_counts": "true"}).json()["items"]
+    assert {i["_id"]: i["_incoming_counts"]["test_results.type"] for i in counts} == {tensile["_id"]: 5000,
+                                                                                    shear["_id"]: 0}
+    page = api("GET", results_url, "ua", 200, params={"type": tensile["_id"], "fields": "_title", "sort": "_title",
+                                                      "page": 2, "page_size": 50}).json()
+    assert page["total"] == 5000 and [i["_title"] for i in page["items"][:2]] == ["R-0050", "R-0051"], page["total"]
+    found = api("GET", results_url, "ua", 200, params={"type": tensile["_id"], "q": "R-4321"}).json()
+    assert [i["_title"] for i in found["items"]] == ["R-4321"], found
+
+    # --- export: the grid's rows (filters, sort) and columns, links as "title (#id)" -----------
+    r1 = api("POST", results_url, "ua", 201, json={"sample": "S-1", "value": 1.5, "tested": "2026-11-19 09:30",
+                                                   "passed": True, "note": "=1+1", "type": shear["_id"]}).json()
+    r2 = api("POST", results_url, "ua", 201, json={"sample": "S-2", "value": 2.25, "passed": False, "note": "-5 mm",
+                                                   "type": shear["_id"], "related": [r1["_id"]]}).json()
+    params = {"type": shear["_id"], "sort": "-value", "incoming_counts": "true", "_tz": "Europe/Istanbul",
+              "fields": "_id,sample,value,tested,passed,note,type,related,_updated_at"}
+    r = api("GET", f"{results_url}.xlsx", "ua", 200, params=params)
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml")
+    assert r.headers["content-disposition"].startswith('attachment; filename="Test results ')
+    sheet = openpyxl.load_workbook(io.BytesIO(r.content)).active
+    rows = list(sheet.iter_rows(values_only=True))
+    assert rows[0] == ("ID", "Sample", "Value", "Tested", "Passed", "Note", "Type", "Related", "Updated",
+                       "Test results › Related (count)"), rows[0]
+    updated = (datetime.datetime.strptime(r2["_updated_at"], "%Y-%m-%dT%H:%M:%SZ") + datetime.timedelta(hours=3))
+    assert rows[1] == (r2["_id"], "S-2", 2.25, None, False, "-5 mm", f"Shear (#{shear['_id']})",
+                       f"S-1 (#{r1['_id']})", updated, 0), rows[1]
+    assert rows[2][:8] == (r1["_id"], "S-1", 1.5, datetime.datetime(2026, 11, 19, 9, 30), True, "=1+1",
+                           f"Shear (#{shear['_id']})", None) and rows[2][9] == 1, rows[2]
+    assert sheet.cell(row=3, column=6).data_type == "s"                    # "=1+1" stays text, not a formula
+    assert len(rows) == 3 and sheet.freeze_panes == "A2" and sheet.auto_filter.ref == "A1:J3"
+    r = api("GET", f"{results_url}.csv", "ua", 200, params=params)
+    assert r.content.startswith(b"\xef\xbb\xbf")                           # so Excel reads UTF-8
+    table = list(csv.reader(io.StringIO(r.content.decode("utf-8-sig"))))
+    assert table[1][2:6] == ["2.25", "", "false", "'-5 mm"] and table[2][3:6] == ["2026-11-19 09:30:00", "true", "'=1+1"], table
+    everything = list(csv.reader(io.StringIO(api("GET", f"{types_url}.csv", "ua", 200).content.decode("utf-8-sig"))))
+    assert everything[0] == ["ID", "Name", "Created", "Created by", "Updated", "Updated by"], everything[0]
+    assert len(api("GET", f"{API}/tests/objects.csv", "un", 200).content.decode("utf-8-sig").splitlines()) == 1
+    api("GET", f"{results_url}.xlsx", "ua", 400, params={"fields": "_id,nope"})
+    api("GET", f"{results_url}.pdf", "ua", 404)
+    many = Cells.links([{"_id": n, "_title": f"R-{n:05d}"} for n in range(10000)])
+    assert len(many) <= CELL_MAX and many.endswith("more"), many[-40:]   # fits one Excel cell
+
+    api("DELETE", f"{API}/test_results?force=true", "da", 204)
+    api("DELETE", f"{API}/test_types?force=true", "da", 204)
+
+
 def test_atlas():
     try:
         make_v1_atlas_db()                   # starting the app must bring it up to date
@@ -530,6 +624,7 @@ def test_atlas():
                 api.login(username)
             run(api, role)
             run_files(api, role)
+            run_export(api)
     finally:
         engine.dispose()
         shutil.rmtree(TMP, ignore_errors=True)
