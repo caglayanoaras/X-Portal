@@ -3,16 +3,21 @@
 An export is the grid as it stands: the same filters, search and sort, and the
 columns asked for (fields=..., in that order). A linked object is written as
 "title (#id)", so a reader can find it in that class's own export, whose ID
-column holds the same number. incoming_counts adds, per relationship of another
+column holds the same number; a portal user as "Ayşe Yılmaz (ayse)". incoming_counts adds, per relationship of another
 class pointing here, how many objects link in.
 
 Excel files hold real numbers, dates and yes/no values; Created and Updated are
 in the time zone asked for (the browser's). CSV files are for scripts and other
-tools: UTF-8 with a byte order mark, commas, ISO dates and true/false.
+tools: UTF-8 with a byte order mark, commas, ISO dates and true/false. Lists and
+matrices are JSON ([210, 212] and [[0, 0], [0.1, 210]]), which an import reads
+back; one too long for an Excel cell says so instead (the CSV has it whole).
+A system column is called "ID (Atlas)", "Version (Atlas)" and so on when an
+attribute or relationship of the class has that label, so no two columns share a name.
 """
 import csv
 import datetime as dt
 import io
+import json
 import re
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -21,6 +26,7 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
+from app.atlas.db import fold
 from app.atlas.errors import AtlasError
 from app.atlas.objects import count_objects, iter_objects
 from app.atlas.schema import AtlasClass, Schema
@@ -29,14 +35,18 @@ FORMATS = {"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.
            "csv": "text/csv; charset=utf-8"}
 MAX_ROWS = 100_000
 CELL_MAX = 32_000                 # Excel holds at most 32,767 characters in a cell
+# What an Excel cell says instead of a list or matrix too long for it; an import of the
+# file leaves that value as it is (importer.py knows this wording).
+TOO_LONG = "({count:,} {what}: too long for an Excel cell; the CSV export holds them all)"
 SYSTEM_COLUMNS = {"_id": ("ID", "int"), "_created_at": ("Created", "stamp"), "_created_by": ("Created by", "text"),
                   "_updated_at": ("Updated", "stamp"), "_updated_by": ("Updated by", "text"),
                   "_version": ("Version", "int"), "_roles": ("Roles", "roles")}
 DEFAULT_SYSTEM = ("_created_at", "_created_by", "_updated_at", "_updated_by")
+FORMULA_START = ("=", "+", "-", "@", "\t", "\r")    # a CSV puts ' before text starting so; an import takes it off
 KINDS = {"int": "int", "float": "float", "boolean": "bool", "date": "date", "datetime": "datetime",
-         "image": "file", "file": "file"}
+         "image": "file", "file": "file", "list": "series", "matrix": "series", "user": "user"}
 WIDTHS = {"int": 10, "float": 12, "bool": 8, "date": 12, "datetime": 17, "stamp": 17, "link": 36, "file": 28,
-          "count": 14, "roles": 20, "text": 24}
+          "count": 14, "roles": 20, "text": 24, "series": 30, "user": 24}
 
 
 class Column:
@@ -56,7 +66,7 @@ def columns(schema: Schema, cls: AtlasClass, fields=None, incoming_counts: bool 
             continue
         seen.add(name)
         if name in SYSTEM_COLUMNS:
-            out.append(Column(name, *SYSTEM_COLUMNS[name]))
+            out.append(Column(name, system_header(cls, name), SYSTEM_COLUMNS[name][1]))
         elif cls.attr(name) is not None:
             attr = cls.attr(name)
             final = attr if attr.stored else schema.resolve(attr)[1]
@@ -73,6 +83,14 @@ def columns(schema: Schema, cls: AtlasClass, fields=None, incoming_counts: bool 
     return out
 
 
+def system_header(cls: AtlasClass, key: str) -> str:
+    """A system column's header: "ID", or "ID (Atlas)" when an attribute or relationship
+    of the class is labelled ID, so an import can tell the two apart."""
+    header = SYSTEM_COLUMNS[key][0]
+    taken = {" ".join(fold(member.label).split()) for member in (*cls.attributes, *cls.relationships)}
+    return f"{header} (Atlas)" if fold(header) in taken else header
+
+
 def build(conn, schema: Schema, cls: AtlasClass, viewer, filters, *, fmt: str, text=None, sort=None,
           fields=None, incoming_counts: bool = False, tz=None, role_names=None) -> tuple:
     """(file bytes, media type, file name) for the objects the list would give."""
@@ -87,7 +105,7 @@ def build(conn, schema: Schema, cls: AtlasClass, viewer, filters, *, fmt: str, t
     expand = ",".join(c.key for c in cols if c.kind == "link") or None
     chunks = iter_objects(conn, schema, cls, viewer, filters, text=text, sort=sort, expand=expand,
                           incoming_counts=any(c.kind == "count" for c in cols))
-    cells = Cells(zone, role_names or {})
+    cells = Cells(zone, role_names or {}, conn.users if any(c.kind == "user" for c in cols) else None)
     body = _workbook(cls, cols, chunks, cells) if fmt == "xlsx" else _csv(cols, chunks, cells)
     name = f"{cls.label} {dt.datetime.now(zone):%Y-%m-%d %H%M}.{fmt}"
     return body, FORMATS[fmt], name
@@ -103,8 +121,8 @@ def _zone(tz):
 class Cells:
     """Turns API values into cell values (Excel) or text (CSV)."""
 
-    def __init__(self, zone, role_names: dict):
-        self.zone, self.role_names = zone, role_names
+    def __init__(self, zone, role_names: dict, users=None):
+        self.zone, self.role_names, self.users = zone, role_names, users     # users: users.Users
 
     @staticmethod
     def value(col: Column, item: dict):
@@ -138,12 +156,16 @@ class Cells:
         """The text form of a value: what the CSV holds, and Excel cells that are text."""
         if col.kind == "link":
             return self.links(value)
+        if col.kind == "series":
+            return json.dumps(value, separators=(", ", ": "))
         if col.kind == "file":
             return value["name"]
-        if col.kind == "roles":
-            return ", ".join(self.role_names.get(role, f"#{role}") for role in value)
+        if col.kind == "roles":                     # separated as links are, which an import reads back
+            return "; ".join(self.role_names.get(role, f"#{role}") for role in value)
         if isinstance(value, list):                 # a look-through through a 'many' relationship
             return "; ".join(self.text(col, v) for v in value if v is not None)
+        if col.kind == "user":                      # "Ayşe Yılmaz (ayse)", which an import reads back
+            return self.users.label(value)
         if col.kind == "bool":
             return "true" if value else "false"
         if col.kind == "datetime":
@@ -165,6 +187,11 @@ class Cells:
             cell = WriteOnlyCell(ws, value=moment)
             cell.number_format = "yyyy-mm-dd" if col.kind == "date" else "yyyy-mm-dd hh:mm"
             return cell
+        if col.kind == "series":
+            text = self.text(col, value)
+            if len(text) <= CELL_MAX:
+                return text
+            return TOO_LONG.format(count=len(value), what="rows" if isinstance(value[0], list) else "values")
         text = self.text(col, value)[:CELL_MAX]
         if text.startswith("="):                     # text, never a formula
             cell = WriteOnlyCell(ws, value=text)
@@ -176,7 +203,7 @@ class Cells:
         if value is None or value == []:
             return ""
         text = self.text(col, value)
-        if col.kind not in ("int", "float", "count", "bool") and text[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        if col.kind not in ("int", "float", "count", "bool") and text[:1] in FORMULA_START:
             try:
                 float(text)                          # "-5" is a number, not a formula
             except ValueError:

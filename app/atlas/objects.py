@@ -10,6 +10,13 @@ An object in the API:
      "photo": {"name": "s12.jpg", "type": "image/jpeg", "size": 48213,
                "width": 1600, "height": 1200}, an upload (null when empty); the file
                                                itself is at …/objects/5/files/photo
+     "readings": [210, 212.5],                 a list
+     "curve": [[0, 0], [0.1, 210]],            a matrix: a row per entry, a value (or
+                                               null) per column; with brief=true lists
+                                               and matrices are {"count": n} instead
+     "technician": 7,                          a portal user's id (GET /atlas/api/users
+                                               has their names); writes also take the
+                                               username
      "location": 3, "retests": [9, 12],        relationships: an id ('one') or ids
                                                ('many'); {"_id", "_title"} with expand
      "_roles": [], "_created_at": "…Z", "_created_by": "…", "_updated_at": "…Z",
@@ -30,7 +37,7 @@ from app.atlas import files
 from app.atlas.db import connect, db_path, fold, transaction
 from app.atlas.errors import AtlasError
 from app.atlas.permissions import Viewer, can_create, can_on_row, row_filter
-from app.atlas.schema import FILE_TYPES, SYSTEM_FIELDS, AtlasClass, Relationship, Schema, q, utc_now
+from app.atlas.schema import FILE_TYPES, SERIES_TYPES, SYSTEM_FIELDS, AtlasClass, Relationship, Schema, q, utc_now
 from app.atlas.values import (coerce, object_ids, out_value, parse_date, parse_datetime, parse_flag,
                               parse_number, role_ids)
 
@@ -68,6 +75,7 @@ class Query:
         self._n = 0
         self._paths = {}
         self._counted = None        # incoming relationships select() counts (None: not asked for)
+        self.brief = False          # lists and matrices as {"count": n} (what a grid needs)
 
     def _alias(self, prefix: str) -> str:
         self._n += 1
@@ -114,7 +122,12 @@ class Query:
     def value(self, attr, src: str, mode: str = "api") -> str:
         """An attribute's value on row src. mode: api (a JSON list for 'many'
         look-throughs; for an upload, a JSON object describing it), text
-        (comma-joined) or sort (the smallest value)."""
+        (comma-joined) or sort (the smallest value). Lists and matrices sort by
+        how many entries they have, and give only that count when brief. A user
+        is their id for the API, their name for text and sort."""
+        if attr.type in SERIES_TYPES:
+            column = f"{src}.{q(attr.key)}"
+            return f"json_array_length({column})" if mode == "sort" or (mode == "api" and self.brief) else column
         if attr.type in FILE_TYPES:
             if mode != "api":
                 return self.file_name(attr, src)
@@ -122,9 +135,12 @@ class Query:
             return (f"(SELECT json_object('name', f.name, 'type', f.type, 'size', f.size{sizes}) "
                     f"FROM atlas_file f WHERE f.id = {src}.{q(attr.key)})")
         if attr.stored:
-            return f"{src}.{q(attr.key)}"
+            column = f"{src}.{q(attr.key)}"
+            return f"atlas_user({column})" if attr.type == "user" and mode != "api" else column
         rels, final = self.path(attr)
         frm, where, col = self._walk(rels, final, src)
+        if final.type == "user" and mode != "api":
+            col = f"atlas_user({col})"
         if mode == "text":
             return f"(SELECT group_concat({col}, ', ') FROM {frm} WHERE {where})"
         if mode == "sort":
@@ -189,6 +205,8 @@ class Query:
     def _scalar(self, col: str, ftype: str, op: str, raw, name: str):
         if op == "isnull":
             return (f"{col} IS NULL" if self._flag(raw, name) else f"{col} IS NOT NULL"), []
+        if ftype == "user":
+            return self._user(col, op, raw, name)
         if op in ("contains", "startswith"):
             return f"atlas_fold(CAST({col} AS TEXT)) LIKE ? {_ESCAPE}", [_like(str(raw), op)]
         if op == "on":
@@ -204,6 +222,28 @@ class Query:
         if op == "ne":
             return f"({col} IS NULL OR {col} != ?)", [value]
         return f"{col} {_COMPARE[op]} ?", [value]
+
+    @staticmethod
+    def _user(col: str, op: str, raw, name: str):
+        """A user filter: eq, ne and in take ids or usernames; contains and startswith match the name."""
+        if op in ("contains", "startswith"):
+            return f"atlas_fold(atlas_user({col}) || ' ' || atlas_username({col})) LIKE ? {_ESCAPE}", [_like(str(raw), op)]
+        if op not in ("eq", "ne", "in"):
+            raise AtlasError(400, f"Filter '{name}': users support eq, ne, in, isnull, contains and startswith.")
+        parts = _split(raw) if op == "in" else [str(raw).strip()]
+        ids = [int(p.lstrip("#")) for p in parts if p.lstrip("#").isdigit()]
+        names = [p for p in parts if p and not p.lstrip("#").isdigit()]
+        conds, args = [], []
+        if ids:
+            conds.append(f"{col} IN ({', '.join('?' * len(ids))})")
+            args += ids
+        if names:
+            conds.append(f"atlas_username({col}) IN ({', '.join('?' * len(names))})")
+            args += names
+        if not conds:
+            return ("1" if op == "ne" else "0"), []
+        cond = " OR ".join(conds)
+        return (f"({col} IS NULL OR NOT ({cond}))" if op == "ne" else f"({cond})"), args
 
     def _relationship_condition(self, rel: Relationship, op: str, raw, name: str):
         l = self._alias("l")
@@ -239,6 +279,10 @@ class Query:
                 raise AtlasError(400, f"Filter '{name}': images and files support isnull, and eq, ne, "
                                       f"contains and startswith on the file name.")
             return self._scalar(self.file_name(member, "s"), "string", op, raw, name)
+        if member.type in SERIES_TYPES:       # lists and matrices: whether there is one
+            if op != "isnull":
+                raise AtlasError(400, f"Filter '{name}': lists and matrices support isnull only.")
+            return self._scalar(f"s.{q(member.key)}", "int", op, raw, name)
         if member.stored:
             return self._scalar(f"s.{q(member.key)}", member.type, op, raw, name)
         rels, final = self.path(member)       # look-through: true when any value matches
@@ -263,17 +307,21 @@ class Query:
             pattern = _like(word, "contains")
             parts = []
             for attr in self.cls.attributes:
-                if self.final_type(attr) == "boolean":
+                ftype = self.final_type(attr)
+                if ftype == "boolean" or attr.type in SERIES_TYPES:
                     continue
                 if attr.type in FILE_TYPES:
                     parts.append(f"atlas_fold({self.file_name(attr, 's')}) LIKE ? {_ESCAPE}")
-                elif attr.stored:
-                    parts.append(f"atlas_fold(CAST(s.{q(attr.key)} AS TEXT)) LIKE ? {_ESCAPE}")
+                    continue
+                frm = None
+                if attr.stored:
+                    col = f"s.{q(attr.key)}"
                 else:
                     rels, final = self.path(attr)
                     frm, where, col = self._walk(rels, final, "s")
-                    parts.append(f"EXISTS (SELECT 1 FROM {frm} WHERE {where} "
-                                 f"AND atlas_fold(CAST({col} AS TEXT)) LIKE ? {_ESCAPE})")
+                text = f"atlas_user({col}) || ' ' || atlas_username({col})" if ftype == "user" else f"CAST({col} AS TEXT)"
+                match = f"atlas_fold({text}) LIKE ? {_ESCAPE}"
+                parts.append(match if frm is None else f"EXISTS (SELECT 1 FROM {frm} WHERE {where} AND {match})")
             for rel in self.cls.relationships:
                 parts.append(self._linked_title_like(rel, "contains"))
             for name in ("_created_by", "_updated_by"):
@@ -346,10 +394,11 @@ class Query:
             args += read_args
         return cols, args
 
-    def select(self, fields=None, *, incoming_counts=False):
+    def select(self, fields=None, *, incoming_counts=False, brief=False):
         def want(key):
             return fields is None or key in fields
 
+        self.brief = brief
         cols, args = ['s."_id" AS "_id"'], []
         if want("_title"):
             cols.append(f'{self.title(self.cls, "s")} AS "_title"')
@@ -381,7 +430,9 @@ class Query:
         for attr in self.cls.attributes:
             if attr.key in keys:
                 value, ftype = row[attr.key], self.final_type(attr)
-                if ftype in FILE_TYPES:
+                if ftype in SERIES_TYPES and self.brief:
+                    out[attr.key] = None if value is None else {"count": value}
+                elif ftype in FILE_TYPES:
                     out[attr.key] = json.loads(value) if value else None
                 elif self.is_many(attr):
                     out[attr.key] = [out_value(ftype, v) for v in json.loads(value or "[]")]
@@ -455,16 +506,18 @@ def class_visible(conn, viewer: Viewer, cls: AtlasClass) -> bool:
 
 def list_objects(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, filters, *, text=None, sort=None,
                  page: int = 1, page_size: int = PAGE_SIZE, expand=None, fields=None,
-                 incoming_counts: bool = False) -> dict:
+                 incoming_counts: bool = False, brief: bool = False) -> dict:
     """A page of objects. With incoming_counts, each one also gets _incoming_counts:
-    {"class.relationship": how many objects you can read link to it that way}."""
+    {"class.relationship": how many objects you can read link to it that way}.
+    With brief, lists and matrices are {"count": n}: a grid page stays small when
+    every object holds a curve of thousands of points."""
     query = Query(schema, cls, viewer)
     page = max(1, int(page))
     page_size = min(max(1, int(page_size)), PAGE_SIZE_MAX)
     wanted = query.parse_fields(fields)
     where, args = query.where(filters, text)
     total = conn.execute(f"SELECT COUNT(*) FROM {q(cls.table)} s WHERE {where}", args).fetchone()[0]
-    select_sql, select_args = query.select(wanted, incoming_counts=incoming_counts)
+    select_sql, select_args = query.select(wanted, incoming_counts=incoming_counts, brief=brief)
     rows = conn.execute(
         f"SELECT {select_sql} FROM {q(cls.table)} s WHERE {where} "
         f"ORDER BY {query.order_by(sort or '_id')} LIMIT ? OFFSET ?",
@@ -542,7 +595,7 @@ def get_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_id:
 # --------------------------------------------------------------------------- #
 # Writing
 # --------------------------------------------------------------------------- #
-def _parse_write(cls: AtlasClass, payload, viewer: Viewer, current_roles: list):
+def _parse_write(conn, cls: AtlasClass, payload, viewer: Viewer, current_roles: list):
     """(values, links, roles) from a POST/PATCH body; roles is None when not sent."""
     if not isinstance(payload, dict):
         raise AtlasError(400, "Send the object as a JSON object.")
@@ -563,9 +616,16 @@ def _parse_write(cls: AtlasClass, payload, viewer: Viewer, current_roles: list):
                     values[key] = None            # null clears it
                 elif not isinstance(value, dict):  # a dict is what GET returned: left as it is
                     errors.append(f"{attr.label}: upload it with PUT …/objects/<id>/files/{key}.")
+            elif attr.type in SERIES_TYPES and isinstance(value, dict) and set(value) == {"count"}:
+                continue                          # what a brief list returned: left as it is
+            elif attr.type == "user":             # an id or a username, of a user the portal has
+                try:
+                    values[key] = conn.users.find(value)
+                except ValueError as exc:
+                    errors.append(f"{attr.label}: {exc}.")
             elif attr.stored:                     # look-throughs are computed: ignored
                 try:
-                    values[key] = coerce(attr.type, value, attr.options)
+                    values[key] = coerce(attr.type, value, attr.options, columns=attr.width)
                 except ValueError as exc:
                     errors.append(f"{attr.label} {exc}.")
             continue
@@ -631,11 +691,13 @@ def _write_links(conn, rel: Relationship, object_id: int, ids) -> None:
                      [(object_id, i) for i in ids])
 
 
-def _unique_error(cls: AtlasClass, values: dict, exc: sqlite3.IntegrityError) -> AtlasError:
+def _unique_error(conn, cls: AtlasClass, values: dict, exc: sqlite3.IntegrityError) -> AtlasError:
     match = re.search(r"UNIQUE constraint failed: [^.\s]+\.(\w+)", str(exc))
     attr = cls.attr(match.group(1)) if match else None
     if attr is not None:
-        return AtlasError(409, f"{attr.label} must be unique: '{values.get(attr.key)}' is already used.")
+        value = values.get(attr.key)
+        shown = conn.users.name(value) if attr.type == "user" else value
+        return AtlasError(409, f"{attr.label} must be unique: '{shown}' is already used.")
     return AtlasError(409, f"This conflicts with an existing object ({exc}).")
 
 
@@ -648,7 +710,7 @@ def _changed(cls: AtlasClass, row) -> AtlasError:
 def create_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, payload, valid_roles) -> int:
     if not can_create(viewer, cls):
         raise AtlasError(403, f"You can't create objects in {cls.label}.")
-    values, links, roles = _parse_write(cls, payload, viewer, [])
+    values, links, roles = _parse_write(conn, cls, payload, viewer, [])
     roles = roles or []
     _check_roles(roles, valid_roles)
     _require(cls, values, links, uploads=False)
@@ -663,16 +725,17 @@ def create_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, payload
                 f"VALUES ({', '.join('?' * len(columns))})",
                 [json.dumps(roles), now, viewer.username, now, viewer.username, 1, *values.values()]).lastrowid
         except sqlite3.IntegrityError as exc:
-            raise _unique_error(cls, values, exc) from None
+            raise _unique_error(conn, cls, values, exc) from None
         for key, ids in links.items():
             _write_links(conn, cls.rel(key), object_id, ids)
     return object_id
 
 
 def update_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_id: int, payload,
-                  valid_roles) -> None:
-    """Apply a partial update. Sending "_version" makes it fail with 409 if the
-    object changed since that version was read."""
+                  valid_roles) -> bool:
+    """Apply a partial update; False when it changes nothing (no new version).
+    Sending "_version" makes it fail with 409 if the object changed since that
+    version was read."""
     if not isinstance(payload, dict):
         raise AtlasError(400, "Send the object as a JSON object.")
     row = conn.execute(f'SELECT * FROM {q(cls.table)} WHERE "_id" = ?', (object_id,)).fetchone()
@@ -688,7 +751,7 @@ def update_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_
             raise AtlasError(400, "_version must be a number.") from None
         if expected != row["_version"]:
             raise _changed(cls, row)
-    values, links, roles = _parse_write(cls, payload, viewer, current_roles)
+    values, links, roles = _parse_write(conn, cls, payload, viewer, current_roles)
     if roles is not None:
         _check_roles(roles, valid_roles)
     current_links = {rel.key: _linked_ids(conn, rel, object_id) for rel in cls.relationships}
@@ -699,7 +762,7 @@ def update_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_
     relinked = {k: ids for k, ids in links.items() if set(ids) != set(current_links[k])}
     roles_changed = roles is not None and set(roles) != set(current_roles)
     if not (changed or relinked or roles_changed):
-        return                                   # nothing to save: no new version
+        return False                             # nothing to save: no new version
     sets = [f"{q(k)} = ?" for k in changed] + ['"_updated_at" = ?', '"_updated_by" = ?',
                                                '"_version" = "_version" + 1']
     args = [*changed.values(), utc_now(), viewer.username]
@@ -713,12 +776,13 @@ def update_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_
             cursor = conn.execute(f'UPDATE {q(cls.table)} SET {", ".join(sets)} WHERE "_id" = ? AND "_version" = ?',
                                   [*args, object_id, row["_version"]])
         except sqlite3.IntegrityError as exc:
-            raise _unique_error(cls, changed, exc) from None
+            raise _unique_error(conn, cls, changed, exc) from None
         if cursor.rowcount == 0:
             raise AtlasError(409, f"{cls.label} #{object_id} was changed meanwhile. Reload it and try again.")
         for key, ids in relinked.items():
             _write_links(conn, cls.rel(key), object_id, ids)
         files.delete(conn, [row[k] for k, v in changed.items() if v is None and cls.attr(k).type in FILE_TYPES])
+    return True
 
 
 def delete_object(conn, schema: Schema, cls: AtlasClass, viewer: Viewer, object_id: int) -> None:

@@ -35,6 +35,11 @@ export async function upload(url, file, version) {
   return answer(await fetch(url, { method: 'PUT', headers: { Accept: 'application/json' }, body: form }));
 }
 
+// POST multipart form data (a FormData); answers like api().
+export async function postForm(url, form) {
+  return answer(await fetch(url, { method: 'POST', headers: { Accept: 'application/json' }, body: form }));
+}
+
 // Attribute types whose value is an uploaded image or file.
 export const FILE_TYPES = ['image', 'file'];
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -28,20 +29,26 @@ from app.atlas.errors import AtlasError
 from app.atlas.values import coerce, role_ids
 
 ATTRIBUTE_TYPES = ("string", "text", "int", "float", "boolean", "date", "datetime",
-                   "choice", "image", "file", "lookthrough")
+                   "choice", "user", "list", "matrix", "image", "file", "lookthrough")
 # How the class builder names each type, for messages people read.
 TYPE_NAMES = {"string": "text", "text": "long text", "int": "integer", "float": "float",
               "boolean": "yes / no", "date": "date", "datetime": "date and time", "choice": "choice",
-              "image": "image", "file": "file", "lookthrough": "look-through"}
+              "user": "user", "list": "list", "matrix": "matrix", "image": "image", "file": "file",
+              "lookthrough": "look-through"}
+# A user attribute holds a portal user's id; Atlas reads the users from the portal (users.py).
 # Types whose column holds the id of an uploaded file (atlas_file); see files.py.
 FILE_TYPES = frozenset({"image", "file"})
+# Types whose column holds many numbers as JSON: a list ([1, 2]) or a matrix, one row
+# per entry and a value per column ([[0, 0], [0.1, 210]]); see values.py.
+SERIES_TYPES = frozenset({"list", "matrix"})
+MATRIX_COLUMNS_MAX = 20
 CARDINALITIES = ("one", "many")
 COLOR_PATTERN = re.compile(r"#[0-9a-f]{6}")                  # "#21358b"
 ICON_PATTERN = re.compile(r"fa-[a-z0-9]+(?:-[a-z0-9]+)*")    # a Font Awesome name: "fa-flask"
 KEY_PATTERN = re.compile(r"[a-z](?:_?[a-z0-9])*")   # no leading, trailing or double "_"
 KEY_MAX = 40
 # Query-string words of the objects API, so no field may use them as its key.
-RESERVED_KEYS = frozenset({"q", "sort", "page", "page_size", "expand", "fields", "incoming_counts"})
+RESERVED_KEYS = frozenset({"q", "sort", "page", "page_size", "expand", "fields", "incoming_counts", "brief"})
 
 # System fields every object has, with the type used to filter and sort them.
 # Timestamps are UTC ISO 8601 ("2026-11-06T09:12:00Z").
@@ -88,11 +95,17 @@ class Attribute:
     show: bool = True            # a column in the grid by default
     options: list = field(default_factory=list)   # choice
     lookup: str = ""                              # lookthrough: "relationship.attribute"
+    columns: list = field(default_factory=list)   # matrix: [{"key": "strain", "label": "Strain (%)"}, …]
     cls: AtlasClass | None = field(default=None, repr=False)
 
     @property
     def stored(self) -> bool:
         return self.type != "lookthrough"
+
+    @property
+    def width(self) -> int:
+        """How many values a matrix row holds."""
+        return len(self.columns)
 
 
 @dataclass(eq=False)
@@ -201,7 +214,7 @@ def load_schema(conn) -> Schema:
         classes[row["class_id"]].attributes.append(Attribute(
             key=row["key"], label=row["label"], type=row["type"], required=bool(row["required"]),
             unique=bool(row["is_unique"]), title=bool(row["is_title"]), show=bool(row["show"]),
-            options=json.loads(row["options"]), lookup=row["lookup"]))
+            options=json.loads(row["options"]), lookup=row["lookup"], columns=json.loads(row["columns"])))
     keys = {class_id: cls.key for class_id, cls in classes.items()}
     for row in conn.execute("SELECT * FROM atlas_relationship ORDER BY class_id, position, id"):
         classes[row["class_id"]].relationships.append(Relationship(
@@ -216,7 +229,8 @@ def load_schema(conn) -> Schema:
 # --------------------------------------------------------------------------- #
 _CLASS_FIELDS = {"key", "label", "path", "description", "color", "icon", "roles", "attributes",
                  "relationships"}
-_ATTRIBUTE_FIELDS = {"key", "label", "type", "required", "unique", "title", "show", "options", "lookup"}
+_ATTRIBUTE_FIELDS = {"key", "label", "type", "required", "unique", "title", "show", "options", "lookup",
+                     "columns"}
 _RELATIONSHIP_FIELDS = {"key", "label", "target", "cardinality", "required", "show", "reverse_label"}
 # Read-only fields a GET returns, so PUTting that same JSON back just works.
 _READ_ONLY_FIELDS = {"created_at", "created_by", "updated_at", "updated_by", "permissions",
@@ -228,6 +242,15 @@ def check_key(value, what: str) -> str:
         raise AtlasError(400, f"{what} must use lower-case letters, digits and single underscores, "
                               f"start with a letter and be at most {KEY_MAX} characters (e.g. batch_no).")
     return value
+
+
+def slugify(text: str) -> str:
+    """A key from a label, as the class builder makes them: "Gerilme (MPa)" -> "gerilme_mpa"."""
+    text = unicodedata.normalize("NFKD", fold(text))
+    text = re.sub(r"[^a-z0-9]+", "_", "".join(c for c in text if not unicodedata.combining(c))).strip("_")
+    if text[:1].isdigit():
+        text = "n_" + text
+    return re.sub(r"_+", "_", text)[:KEY_MAX].rstrip("_")
 
 
 def _unknown(data: dict, allowed: set, what: str) -> None:
@@ -318,9 +341,35 @@ def _parse_attribute(item, n: int) -> Attribute:
         attr.lookup = lookup.strip()
         if attr.required or attr.unique:
             raise AtlasError(400, f"The look-through '{label}' can't be required or unique.")
-    if atype in FILE_TYPES and (attr.unique or attr.title):
+    if atype == "matrix":
+        attr.columns = _matrix_columns(item.get("columns"), label)
+    if (atype in FILE_TYPES or atype in SERIES_TYPES) and (attr.unique or attr.title):
         raise AtlasError(400, f"The {TYPE_NAMES[atype]} '{label}' can't be unique or part of the title.")
     return attr
+
+
+def _matrix_columns(value, label: str) -> list:
+    """A matrix's columns: [{"key", "label"}, …], or just labels (keys are made from them)."""
+    if not isinstance(value, list) or not value:
+        raise AtlasError(400, f"The matrix '{label}' needs at least one column.")
+    if len(value) > MATRIX_COLUMNS_MAX:
+        raise AtlasError(400, f"The matrix '{label}' can have at most {MATRIX_COLUMNS_MAX} columns.")
+    columns, keys = [], set()
+    for n, item in enumerate(value, start=1):
+        if isinstance(item, str):
+            item = {"label": item}
+        if not isinstance(item, dict):
+            raise AtlasError(400, f"Column {n} of '{label}' must be a label or {{\"key\", \"label\"}}.")
+        extra = sorted(set(item) - {"key", "label"})
+        if extra:
+            raise AtlasError(400, f"Unknown field(s) in column {n} of '{label}': {', '.join(extra)}.")
+        name = _text(item.get("label"), f"The label of column {n} of '{label}'", required=True, limit=100)
+        key = check_key(item.get("key") or slugify(name), f"The key of column '{name}' of '{label}'")
+        if key in keys:
+            raise AtlasError(400, f"The matrix '{label}' has two columns with the key '{key}'.")
+        keys.add(key)
+        columns.append({"key": key, "label": name})
+    return columns
 
 
 def _parse_relationship(item, n: int) -> Relationship:
@@ -392,8 +441,10 @@ def _validate(schema: Schema) -> None:
                 raise AtlasError(400, f"'{cls.label} › {rel.label}' points at '{rel.target_key}', "
                                       f"which is not a class.")
         for attr in cls.attributes:
-            if not attr.stored and schema.resolve(attr)[1].type in FILE_TYPES:
-                raise AtlasError(400, f"The look-through '{cls.label} › {attr.label}' can't show an image or file; "
+            final = None if attr.stored else schema.resolve(attr)[1]
+            if final is not None and (final.type in FILE_TYPES or final.type in SERIES_TYPES):
+                raise AtlasError(400, f"The look-through '{cls.label} › {attr.label}' can't show "
+                                      f"{'an' if final.type == 'image' else 'a'} {TYPE_NAMES[final.type]}; "
                                       f"open the linked object to see it.")
 
 
@@ -434,9 +485,10 @@ def _insert_members(conn, cls: AtlasClass) -> None:
     for position, a in enumerate(cls.attributes):
         conn.execute(
             "INSERT INTO atlas_attribute (class_id, key, label, type, position, required, is_unique,"
-            " is_title, show, options, lookup) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " is_title, show, options, lookup, columns) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (cls.id, a.key, a.label, a.type, position, int(a.required), int(a.unique), int(a.title),
-             int(a.show), json.dumps(a.options, ensure_ascii=False), a.lookup))
+             int(a.show), json.dumps(a.options, ensure_ascii=False), a.lookup,
+             json.dumps(a.columns, ensure_ascii=False)))
     for position, r in enumerate(cls.relationships):
         conn.execute(
             "INSERT INTO atlas_relationship (class_id, key, label, target_class_id, cardinality,"
@@ -514,7 +566,7 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
     table = q(old.table)
     dropped = [k for k, a in old_attrs.items() if a.stored and (k not in new_attrs or not new_attrs[k].stored)]
     added = [k for k, a in new_attrs.items() if a.stored and (k not in old_attrs or not old_attrs[k].stored)]
-    warnings, conversions = [], {}
+    warnings, conversions, remapped = [], {}, set()
     for key in dropped:
         n = _count(conn, f"SELECT COUNT(*) FROM {table} WHERE {q(key)} IS NOT NULL")
         if n:
@@ -523,6 +575,14 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
     for key, new in new_attrs.items():
         before = old_attrs.get(key)
         if not (new.stored and before is not None and before.stored):
+            continue
+        if new.type == before.type == "matrix":      # columns added, removed or moved
+            changes, warning = _remap_columns(conn, table, before, new)
+            if changes:
+                conversions[key] = changes
+                remapped.add(key)
+            if warning:
+                warnings.append(warning)
             continue
         if new.type == before.type and (new.type != "choice" or set(new.options) >= set(before.options)):
             continue
@@ -535,8 +595,10 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
             continue
         changes, lost = [], 0
         for object_id, value in conn.execute(f'SELECT "_id", {q(key)} FROM {table} WHERE {q(key)} IS NOT NULL'):
+            source = conn.users.name(value) if before.type == "user" else value     # a user turns into their name
             try:
-                converted = coerce(new.type, value, new.options)
+                converted = (conn.users.find(source) if new.type == "user"   # a name or username finds the user
+                             else coerce(new.type, source, new.options, columns=new.width))
             except ValueError:
                 converted, lost = None, lost + 1
             if converted != value or type(converted) is not type(value):
@@ -591,9 +653,15 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
                 conn.execute(f"ALTER TABLE {table} DROP COLUMN {q(key)}")
             for key in added:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {q(key)}")
+            stamp = utc_now()
             for key, changes in conversions.items():
                 conn.execute(f"DROP INDEX IF EXISTS {q(_unique_index(old, key))}")
-                conn.executemany(f'UPDATE {table} SET {q(key)} = ? WHERE "_id" = ?', changes)
+                if key in remapped:     # a new version, so a form still showing the old columns can't save its rows
+                    conn.executemany(f'UPDATE {table} SET {q(key)} = ?, "_version" = "_version" + 1, '
+                                     f'"_updated_at" = ?, "_updated_by" = ? WHERE "_id" = ?',
+                                     [(value, stamp, user, object_id) for value, object_id in changes])
+                else:
+                    conn.executemany(f'UPDATE {table} SET {q(key)} = ? WHERE "_id" = ?', changes)
             for attr in cls.stored_attributes:
                 _sync_unique(conn, cls, attr)
             for key, rel in old_rels.items():
@@ -607,6 +675,32 @@ def update_class(conn, schema: Schema, cls: AtlasClass, user: str, *, force: boo
             sweep_files(conn, new_schema)
     except sqlite3.IntegrityError as exc:
         raise AtlasError(409, f"The change conflicts with existing data ({exc}).") from None
+
+
+def _remap_columns(conn, table: str, before: Attribute, new: Attribute):
+    """A matrix whose columns were added, removed or moved: every value rewritten to
+    the new columns, matched by key. (changes, a warning when values are lost)."""
+    old_keys = [c["key"] for c in before.columns]
+    new_keys = [c["key"] for c in new.columns]
+    if old_keys == new_keys:
+        return [], None
+    where = {k: i for i, k in enumerate(old_keys)}
+    removed = [i for i, k in enumerate(old_keys) if k not in new_keys]
+    changes, lost, emptied = [], 0, set()
+    for object_id, value in conn.execute(f'SELECT "_id", {q(new.key)} FROM {table} WHERE {q(new.key)} IS NOT NULL'):
+        rows = json.loads(value)
+        held = {i for i in removed if any(i < len(row) and row[i] is not None for row in rows)}
+        if held:
+            lost += 1
+            emptied |= held
+        out = [[row[where[k]] if k in where and where[k] < len(row) else None for k in new_keys] for row in rows]
+        out = [row for row in out if any(v is not None for v in row)]
+        changes.append((json.dumps(out, separators=(",", ":")) if out else None, object_id))
+    if not lost:
+        return changes, None
+    names = ", ".join(f"'{before.columns[i]['label']}'" for i in sorted(emptied))
+    return changes, (f"Removing the column{'s' if len(emptied) > 1 else ''} {names} of '{new.label}' "
+                     f"deletes values in {lost} object(s).")
 
 
 def delete_class(conn, schema: Schema, key: str, *, force: bool = False) -> None:
@@ -646,6 +740,8 @@ def attribute_to_api(attr: Attribute, schema: Schema) -> dict:
            "unique": attr.unique, "title": attr.title, "show": attr.show}
     if attr.type == "choice":
         out["options"] = list(attr.options)
+    if attr.type == "matrix":
+        out["columns"] = [dict(c) for c in attr.columns]
     if attr.type == "lookthrough":
         out["lookup"] = attr.lookup
         try:

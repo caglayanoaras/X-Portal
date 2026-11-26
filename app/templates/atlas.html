@@ -10,6 +10,7 @@
 <div class="atlas-shell" id="atlas-app"
      data-url-classes="{{ url_for('atlas_api_classes') }}"
      data-url-roles="{{ url_for('atlas_api_roles') }}"
+     data-url-users="{{ url_for('atlas_api_users') }}"
      data-url-admin="{{ url_for('atlas_admin_page') }}"
      data-is-admin="{{ 'true' if is_atlas_admin else 'false' }}"
      data-max-file-mb="{{ max_file_mb }}"
@@ -43,6 +44,14 @@
             <span class="input-group-text"><i class="fas fa-search"></i></span>
             <input type="search" class="form-control" id="atlas-search" placeholder="Search" aria-label="Search">
           </div>
+          <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap d-none" id="atlas-plot"
+                  title="Plot a list or matrix of the objects in the table, one over another">
+            <i class="fas fa-chart-line me-1"></i>Plot
+          </button>
+          <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap d-none" id="atlas-import"
+                  title="Add or change objects from an Excel or CSV file">
+            <i class="fas fa-file-import me-1"></i>Import
+          </button>
           <div class="dropdown">
             <button type="button" class="btn btn-outline-secondary btn-sm text-nowrap dropdown-toggle" id="atlas-export"
                     data-bs-toggle="dropdown" aria-expanded="false" title="The rows and columns as they are now">
@@ -76,8 +85,8 @@
       </div>
       <div class="modal-body">
         <div id="atlas-object-error" class="alert alert-danger py-2 d-none" role="alert"></div>
-        <form id="atlas-object-form" class="row g-3" autocomplete="off"></form>
-        <div id="atlas-object-incoming" class="atlas-incoming"></div>
+        <form id="atlas-object-form" class="atlas-fields" autocomplete="off"></form>
+        <div id="atlas-object-incoming" class="atlas-fields atlas-incoming"></div>
         <div id="atlas-object-meta" class="atlas-meta mt-3"></div>
       </div>
       <div class="modal-footer">
@@ -112,6 +121,86 @@
     </div>
   </div>
 </div>
+
+<!-- A list or matrix as a scatter plot: one object's, or the table's one over another -->
+<div class="modal fade" id="atlas-plot-modal" tabindex="-1">
+  <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title text-truncate" id="atlas-plot-title"></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="atlas-plot-controls">
+          <label id="atlas-plot-attr-field">Attribute <select class="form-select form-select-sm" id="atlas-plot-attr"></select></label>
+          <label id="atlas-plot-x-field">X <select class="form-select form-select-sm" id="atlas-plot-x"></select></label>
+          <label id="atlas-plot-y-field">Y <select class="form-select form-select-sm" id="atlas-plot-y"></select></label>
+          <div class="btn-group btn-group-sm ms-auto" role="group" aria-label="Show as">
+            <button type="button" class="btn btn-outline-secondary" data-plot-view="plot"><i class="fas fa-chart-line me-1"></i>Plot</button>
+            <button type="button" class="btn btn-outline-secondary" data-plot-view="table"><i class="fas fa-table me-1"></i>Table</button>
+          </div>
+        </div>
+        <div class="atlas-plot-stage" id="atlas-plot-stage">
+          <div id="atlas-plot-chart"></div>
+          <ul class="atlas-plot-legend d-none" id="atlas-plot-legend" aria-label="Series"></ul>
+        </div>
+        <div class="atlas-plot-table d-none" id="atlas-plot-table"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="small text-muted me-auto" id="atlas-plot-meta"></span>
+        <button type="button" class="btn btn-outline-secondary" id="atlas-plot-copy"
+                title="Tab-separated, to paste into Excel"><i class="fas fa-copy me-1"></i><span>Copy data</span></button>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Import an Excel or CSV file: check it, then import it -->
+<div class="modal fade" id="atlas-import-modal" tabindex="-1">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title text-truncate" id="atlas-import-title">Import</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div id="atlas-import-error" class="alert alert-danger py-2 d-none" role="alert"></div>
+        <div id="atlas-import-start">
+          <div class="atlas-drop atlas-import-drop" id="atlas-import-drop" tabindex="0">
+            <i class="fas fa-file-excel fa-2x" style="color:#15803d" aria-hidden="true"></i>
+            <div class="atlas-drop-info">
+              <div>Drop an Excel or CSV file here</div>
+              <div class="small text-muted" id="atlas-import-limit"></div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="atlas-import-choose">
+              <i class="fas fa-upload me-1"></i>Choose file
+            </button>
+            <input type="file" class="d-none" id="atlas-import-file" accept=".xlsx,.xlsm,.csv">
+          </div>
+          <ul class="atlas-import-notes">
+            <li>The first row names the columns. Atlas matches them to fields by name, and you can change that.</li>
+            <li>A row with an ID changes that object; a row without one adds a new object. An empty cell clears its field.</li>
+            <li>Nothing is saved until you press Import, and then only if every row is fine.</li>
+          </ul>
+          <div class="small">
+            <a id="atlas-import-template" href="#" download><i class="fas fa-file-arrow-down me-1"></i>Download a template</a>
+            <span class="text-muted">with the right columns and step-by-step instructions.
+              To change many objects at once, export the table, edit it in Excel and import it here.</span>
+          </div>
+        </div>
+        <div id="atlas-import-review" class="d-none"></div>
+      </div>
+      <div class="modal-footer">
+        <span class="small text-muted me-auto" id="atlas-import-status"></span>
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="atlas-import-close">Close</button>
+        <button type="button" class="btn btn-primary" id="atlas-import-apply" disabled>
+          <i class="fas fa-file-import me-1"></i>Import
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block scripts %}
@@ -119,6 +208,12 @@
 {# Versioned URLs (?v=): a changed file gets a new URL, so no browser mixes old and new scripts.
    The import map does the same for the shared module the page script imports. #}
 {% set common = url_for('static', path='js/apps/atlas-common.js') %}
-<script type="importmap">{"imports": {"{{ common }}": "{{ common }}?v={{ asset_version('js/apps/atlas-common.js') }}"}}</script>
+{% set plot = url_for('static', path='js/apps/atlas-plot.js') %}
+{% set importer = url_for('static', path='js/apps/atlas-import.js') %}
+<script type="importmap">{"imports": {
+  "{{ common }}": "{{ common }}?v={{ asset_version('js/apps/atlas-common.js') }}",
+  "{{ plot }}": "{{ plot }}?v={{ asset_version('js/apps/atlas-plot.js') }}",
+  "{{ importer }}": "{{ importer }}?v={{ asset_version('js/apps/atlas-import.js') }}"
+}}</script>
 <script type="module" src="{{ url_for('static', path='js/apps/atlas-app.js') }}?v={{ asset_version('js/apps/atlas-app.js') }}"></script>
 {% endblock %}

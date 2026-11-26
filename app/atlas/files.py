@@ -7,8 +7,10 @@ object, deletes the file, and schema changes sweep away files nothing refers to.
 Images must be PNG, JPEG, GIF, WebP, TIFF or BMP; Pillow opens each one to check
 it. Every image gets a small JPEG thumbnail for grids, and a JPEG preview when a
 browser can't show the original well (TIFF, or more than PREVIEW_SIZE pixels on
-a side); downloads always give the original. Files must be PDF, Office or
-OpenDocument (or CSV), checked by their extension and their first bytes.
+a side); downloads always give the original. Thumbnails and previews live in
+atlas_file_view, so reading one never reads through the image. Files must be
+PDF, Office or OpenDocument (or CSV), checked by their extension and their first
+bytes.
 """
 import hashlib
 import io
@@ -134,11 +136,15 @@ def _document_type(name: str, data: bytes) -> str:
 
 
 def insert(conn, stored: dict, user: str, now: str) -> int:
-    return conn.execute(
-        "INSERT INTO atlas_file (name, type, size, width, height, sha256, data, preview, thumb, created_at,"
-        " created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    file_id = conn.execute(
+        "INSERT INTO atlas_file (name, type, size, width, height, sha256, created_at, created_by, data)"
+        " VALUES (?,?,?,?,?,?,?,?,?)",
         (stored["name"], stored["type"], stored["size"], stored["width"], stored["height"], stored["sha256"],
-         stored["data"], stored["preview"], stored["thumb"], now, user)).lastrowid
+         now, user, stored["data"])).lastrowid
+    if stored["thumb"] is not None or stored["preview"] is not None:
+        conn.execute("INSERT INTO atlas_file_view (file_id, thumb, preview) VALUES (?, ?, ?)",
+                     (file_id, stored["thumb"], stored["preview"]))
+    return file_id
 
 
 def delete(conn, ids) -> None:
@@ -151,14 +157,15 @@ def load(conn, file_id: int, view: str) -> dict:
     """One stored file as {name, type, sha256, body}; view is original, preview or thumb."""
     if view not in VIEWS:
         raise AtlasError(400, "view must be original, preview or thumb.")
-    body = {"original": "data", "preview": "COALESCE(preview, data)", "thumb": "thumb"}[view]
-    row = conn.execute(f"SELECT name, type, sha256, preview IS NOT NULL AS converted, {body} AS body "
-                       f"FROM atlas_file WHERE id = ?", (file_id,)).fetchone()
+    # (what to send, whether it is a JPEG Atlas made); a preview falls back to the original
+    body, converted = {"original": ("f.data", "0"), "thumb": ("v.thumb", "1"),
+                       "preview": ("COALESCE(v.preview, f.data)", "v.preview IS NOT NULL")}[view]
+    row = conn.execute(f"SELECT f.name, f.type, f.sha256, {converted} AS converted, {body} AS body "
+                       f"FROM atlas_file f LEFT JOIN atlas_file_view v ON v.file_id = f.id WHERE f.id = ?",
+                       (file_id,)).fetchone()
     if row is None or row["body"] is None:
         raise AtlasError(404, "There is no such file." if row is None else "Only images have thumbnails.")
-    media = row["type"]
-    if view == "thumb" or (view == "preview" and row["converted"]):
-        media = "image/jpeg"
+    media = "image/jpeg" if row["converted"] else row["type"]
     return {"name": row["name"], "type": media, "sha256": row["sha256"], "body": bytes(row["body"])}
 
 

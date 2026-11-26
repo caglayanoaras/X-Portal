@@ -4,9 +4,14 @@
 import {
   ApiError, FILE_TYPES, api, classIcon, esc, fileIcon, fmtLocal, fmtSize, fmtStamp, fold, renderTree, upload,
 } from './atlas-common.js';
+import { ImportDialog } from './atlas-import.js';
+import {
+  SERIES_TYPES, ScatterPlot, copyText, fmtNumber, parseSeries, seriesColor, seriesPoints, seriesText,
+} from './atlas-plot.js';
 
 const root = document.getElementById('atlas-app');
-const URLS = { classes: root.dataset.urlClasses, roles: root.dataset.urlRoles, admin: root.dataset.urlAdmin };
+const URLS = { classes: root.dataset.urlClasses, roles: root.dataset.urlRoles, users: root.dataset.urlUsers,
+               admin: root.dataset.urlAdmin };
 const IS_ADMIN = root.dataset.isAdmin === 'true';
 const PAGE_SIZE = 100;
 const MAX_FILE_MB = Number(root.dataset.maxFileMb) || 25;
@@ -22,6 +27,9 @@ const NUMBER_FILTER = {
 };
 const DATE_FILTER = { filterOptions: ['equals', 'greaterThan', 'lessThan', 'inRange', 'blank', 'notBlank'], maxNumConditions: 1 };
 const LINK_FILTER = { filterOptions: ['contains', 'blank', 'notBlank'], maxNumConditions: 1 };
+const SERIES_FILTER = { filterOptions: ['blank', 'notBlank'], maxNumConditions: 1 };
+const COMPARE_MAX = 50;          // objects one plot of the table overlays
+const TABLE_ROWS = 1000;         // rows the plot's table view shows (Copy takes them all)
 // AG Grid filter types -> API filter operators ('' = equals)
 const TEXT_OPS = { contains: 'contains', equals: '', notEqual: 'ne', startsWith: 'startswith' };
 const NUMBER_OPS = { equals: '', notEqual: 'ne', greaterThan: 'gt', greaterThanOrEqual: 'gte', lessThan: 'lt', lessThanOrEqual: 'lte' };
@@ -128,6 +136,8 @@ class AtlasBrowser {
     this.classes = [];
     this.roles = [];
     this.roleNames = {};
+    this.users = [];          // portal users, for user attributes (which hold their ids)
+    this.userNames = {};
     this.cls = null;          // the open class's definition
     this.grid = null;
     this.kinds = {};          // grid column -> how its filter maps to the API
@@ -137,7 +147,12 @@ class AtlasBrowser {
     this.fileChanges = {};    // attribute key -> {file, url} to upload or {remove: true}, sent on Save
     this.canEdit = false;     // may the form change the object
     this.pendingRoute = false;
+    this.formPlots = {};      // attribute key -> the live plot beside a list or matrix field
+    this.plotView = null;     // what the plot window shows (see openPlot)
+    this.plotAxes = {};       // attribute key -> {x, y} last chosen in the plot window
     this.modal = bootstrap.Modal.getOrCreateInstance($('atlas-object-modal'));
+    this.importer = new ImportDialog({ classesUrl: URLS.classes, maxFileMb: MAX_FILE_MB,
+                                       onImported: () => this.refreshGrid() });
     this.bind();
     this.init();
   }
@@ -153,6 +168,10 @@ class AtlasBrowser {
     for (const item of document.querySelectorAll('[data-export]')) {
       item.addEventListener('click', () => this.exportTable(item.dataset.export));
     }
+    $('atlas-import').addEventListener('click', () => this.importer.open(this.cls));
+    $('atlas-plot').addEventListener('click', () => this.plotTable());
+    this.bindPlotWindow();
+    this.bindSeriesFields();
     // "Linked from" in the form: the first few, and the whole list (searchable) on request.
     $('atlas-object-incoming').addEventListener('click', e => {
       const button = e.target.closest('[data-show-all]');
@@ -176,6 +195,7 @@ class AtlasBrowser {
       this.selects = {};
       this.dropInlineLists();
       this.dropFileChanges();
+      this.dropFormPlots();
       this.editing = null;
       if (this.pendingRoute) {
         this.pendingRoute = false;
@@ -189,12 +209,14 @@ class AtlasBrowser {
 
   async init() {
     try {
-      [this.classes, this.roles] = await Promise.all([api(URLS.classes), api(URLS.roles)]);
+      [this.classes, this.roles, this.users] = await Promise.all([api(URLS.classes), api(URLS.roles),
+                                                                 api(URLS.users)]);
     } catch (e) {
       this.message(esc(e.message));
       return;
     }
     this.roleNames = Object.fromEntries(this.roles.map(r => [r.id, r.rolename]));
+    this.userNames = Object.fromEntries(this.users.map(u => [u.id, u.name]));
     this.renderTree();
     this.route();
   }
@@ -247,6 +269,8 @@ class AtlasBrowser {
     $('atlas-class-label').textContent = this.cls.label;
     $('atlas-class-description').textContent = this.cls.description || '';
     $('atlas-new').classList.toggle('d-none', !this.cls.permissions.create);
+    $('atlas-import').classList.toggle('d-none', !IS_ADMIN);      // imports are for admins; others use the form
+    $('atlas-plot').classList.toggle('d-none', !this.seriesAttributes().length);
     $('atlas-search').value = '';
     $('atlas-grid-error').classList.add('d-none');
     this.search = '';
@@ -301,11 +325,12 @@ class AtlasBrowser {
       cols.push({ field: r.key, headerName: r.label, hide: true, filter: 'agTextColumnFilter',
                   filterParams: LINK_FILTER, valueFormatter: p => this.linkText(p.value) });
     }
+    // Roles and when and by whom an object was made or changed start hidden too.
     if (IS_ADMIN) {
-      cols.push({ field: '_roles', headerName: 'Roles', sortable: false, filter: false,
+      cols.push({ field: '_roles', headerName: 'Roles', hide: true, sortable: false, filter: false,
                   valueFormatter: p => (p.value || []).map(id => this.roleNames[id] || `#${id}`).join(', ') });
     }
-    for (const [field, headerName, hide] of [['_updated_at', 'Updated', false], ['_updated_by', 'Updated by', false],
+    for (const [field, headerName, hide] of [['_updated_at', 'Updated', true], ['_updated_by', 'Updated by', true],
                                              ['_created_at', 'Created', true], ['_created_by', 'Created by', true]]) {
       const stamp = field.endsWith('_at');
       this.kinds[field] = stamp ? 'timestamp' : 'text';
@@ -337,6 +362,11 @@ class AtlasBrowser {
       return { field: a.key, headerName: a.label, filter: 'agTextColumnFilter', filterParams: LINK_FILTER,
                minWidth: type === 'image' ? 100 : 170, cellRenderer: p => this.fileCell(p.data, a) };
     }
+    if (SERIES_TYPES.includes(type)) {           // the grid gets counts (brief); a click plots the values
+      this.kinds[a.key] = 'text';
+      return { field: a.key, headerName: a.label, filter: 'agTextColumnFilter', filterParams: SERIES_FILTER,
+               minWidth: 130, cellRenderer: p => this.seriesCell(p.data, a) };
+    }
     const col = { field: a.key, headerName: a.label, valueFormatter: p => fmtValue(type, p.value) };
     if (type === 'int' || type === 'float') {
       Object.assign(col, { filter: 'agNumberColumnFilter', filterParams: NUMBER_FILTER, type: 'rightAligned' });
@@ -354,6 +384,11 @@ class AtlasBrowser {
       this.kinds[a.key] = 'set';
     } else if (type === 'choice') {
       Object.assign(col, { filter: 'agSetColumnFilter', filterParams: { values: a.options || [] } });
+      this.kinds[a.key] = 'set';
+    } else if (type === 'user') {                // ids: the cell shows names, the filter ticks people
+      Object.assign(col, { valueFormatter: p => this.userText(p.value), filter: 'agSetColumnFilter',
+                           filterParams: { values: this.users.map(u => String(u.id)),
+                                           valueFormatter: p => this.userLabel(p.value) } });
       this.kinds[a.key] = 'set';
     } else {
       Object.assign(col, { filter: 'agTextColumnFilter', filterParams: TEXT_FILTER });
@@ -410,6 +445,291 @@ class AtlasBrowser {
     bootstrap.Modal.getOrCreateInstance($('atlas-file-modal')).show();
   }
 
+  // -- lists and matrices ---------------------------------------------------------
+  seriesAttributes() {
+    return this.cls ? this.cls.attributes.filter(a => SERIES_TYPES.includes(a.type)) : [];
+  }
+
+  // "12 values" or "120 rows": the grid has the count only (brief=true)
+  seriesCount(a, n) {
+    const noun = a.type === 'list' ? (n === 1 ? 'value' : 'values') : (n === 1 ? 'row' : 'rows');
+    return `${n.toLocaleString()} ${noun}`;
+  }
+
+  seriesCell(data, a) {
+    const v = data && data[a.key];
+    if (!v) return '';
+    return `<button type="button" class="atlas-series-link" data-action="series" data-attr="${esc(a.key)}"
+      title="Plot ${esc(a.label)}"><i class="fas fa-chart-line fa-fw"></i><span>${this.seriesCount(a, v.count)}</span></button>`;
+  }
+
+  // The plot axes of a list or matrix: x is a column index or -1 (the position), y a column index.
+  axesFor(a) {
+    if (a.type === 'list') return { x: -1, y: 0 };
+    const n = (a.columns || []).length;
+    const saved = this.plotAxes[a.key];
+    if (saved && saved.x < n && saved.y < n) return saved;
+    return n > 1 ? { x: 0, y: 1 } : { x: -1, y: 0 };
+  }
+
+  axisLabel(a, index) {
+    if (a.type === 'list') return index < 0 ? 'Position' : a.label;
+    return index < 0 ? 'Row' : (a.columns[index] || {}).label || `Column ${index + 1}`;
+  }
+
+  // One object's list or matrix, from its grid row.
+  async showSeries(data, a) {
+    try {
+      const qs = new URLSearchParams({ _id: data._id, fields: `_title,${a.key}` });
+      const result = await api(`${this.objectsUrl()}?${qs}`);
+      const item = result.items[0];
+      if (!item) throw new Error(`${this.cls.label} #${data._id} is gone.`);
+      this.openPlot({ title: `${a.label} · ${item._title}`, attrs: [a], attr: a,
+                      objects: [{ _id: item._id, _title: item._title, value: item[a.key] }] });
+    } catch (e) {
+      this.notice(e.message);
+    }
+  }
+
+  // The "Plot" button: a list or matrix of the objects in the table (its search, filters
+  // and sort), one series each, the first COMPARE_MAX of them.
+  async plotTable(attr) {
+    const attrs = this.seriesAttributes();
+    const a = attr || (this.plotView && this.plotView.compare && this.plotView.attr) || attrs[0];
+    if (!a) return;
+    const button = $('atlas-plot');
+    button.disabled = true;
+    try {
+      const qs = this.tableQuery();
+      qs.set('fields', `_title,${a.key}`);
+      qs.set('page_size', COMPARE_MAX);
+      qs.append(`${a.key}__isnull`, 'false');
+      const result = await api(`${this.objectsUrl()}?${qs}`);
+      this.openPlot({ compare: true, title: `${a.label} · ${this.cls.label}`, attrs, attr: a, total: result.total,
+                      objects: result.items.map(i => ({ _id: i._id, _title: i._title, value: i[a.key] })) });
+    } catch (e) {
+      this.notice(e.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  bindPlotWindow() {
+    this.plot = new ScatterPlot($('atlas-plot-chart'), { height: 420 });
+    $('atlas-plot-attr').addEventListener('change', () => {
+      const a = this.plotView.attrs.find(x => x.key === $('atlas-plot-attr').value);
+      if (a) this.plotTable(a);
+    });
+    for (const id of ['atlas-plot-x', 'atlas-plot-y']) {
+      $(id).addEventListener('change', () => {
+        const a = this.plotView.attr;
+        this.plotAxes[a.key] = { x: Number($('atlas-plot-x').value), y: Number($('atlas-plot-y').value) };
+        this.drawPlot();
+      });
+    }
+    for (const button of document.querySelectorAll('[data-plot-view]')) {
+      button.addEventListener('click', () => this.plotMode(button.dataset.plotView));
+    }
+    $('atlas-plot-copy').addEventListener('click', async () => {
+      const label = $('atlas-plot-copy').querySelector('span');
+      try {
+        await copyText(this.plotRows().map(row => row.join('\t')).join('\r\n'));
+        label.textContent = 'Copied';
+      } catch (e) {
+        label.textContent = 'Copy failed';
+      }
+      setTimeout(() => { label.textContent = 'Copy data'; }, 1600);
+    });
+    const legend = $('atlas-plot-legend');
+    legend.addEventListener('pointerover', e => {
+      const item = e.target.closest('[data-series]');
+      if (item) this.plot.highlight(Number(item.dataset.series));
+    });
+    legend.addEventListener('pointerleave', () => this.plot.highlight(null));
+    legend.addEventListener('click', e => {         // a series' name opens its object
+      const link = e.target.closest('a[href]');
+      if (!link) return;
+      e.preventDefault();
+      const modal = $('atlas-plot-modal');
+      modal.addEventListener('hidden.bs.modal', () => { location.hash = link.getAttribute('href'); }, { once: true });
+      bootstrap.Modal.getOrCreateInstance(modal).hide();
+    });
+  }
+
+  // view: {title, attrs (to choose from, when comparing), attr, objects: [{_id, _title, value}],
+  //        compare (one series per object), total (objects in the table)}
+  openPlot(view) {
+    this.plotView = view;
+    const a = view.attr;
+    $('atlas-plot-title').textContent = view.title;
+    const choose = view.compare && view.attrs.length > 1;
+    $('atlas-plot-attr-field').classList.toggle('d-none', !choose);
+    $('atlas-plot-attr').innerHTML = view.attrs.map(x =>
+      `<option value="${esc(x.key)}" ${x.key === a.key ? 'selected' : ''}>${esc(x.label)}</option>`).join('');
+    const isMatrix = a.type === 'matrix';
+    for (const id of ['atlas-plot-x-field', 'atlas-plot-y-field']) $(id).classList.toggle('d-none', !isMatrix);
+    if (isMatrix) {
+      const axes = this.axesFor(a);
+      const option = (value, label, selected) => `<option value="${value}" ${selected ? 'selected' : ''}>${esc(label)}</option>`;
+      $('atlas-plot-x').innerHTML = option(-1, 'Row', axes.x === -1)
+        + a.columns.map((c, i) => option(i, c.label, axes.x === i)).join('');
+      $('atlas-plot-y').innerHTML = a.columns.map((c, i) => option(i, c.label, axes.y === i)).join('');
+    }
+    const modal = bootstrap.Modal.getOrCreateInstance($('atlas-plot-modal'));
+    this.plotMode('plot');
+    this.drawPlot();
+    modal.show();
+  }
+
+  drawPlot() {
+    const view = this.plotView;
+    const a = view.attr;
+    const axes = a.type === 'matrix'
+      ? { x: Number($('atlas-plot-x').value), y: Number($('atlas-plot-y').value) } : { x: -1, y: 0 };
+    const series = view.objects.map(o => ({ name: o._title, id: o._id, points: seriesPoints(a.type, o.value, axes.x, axes.y) }));
+    this.plotAxesNow = axes;
+    const xLabel = this.axisLabel(a, axes.x);
+    this.plot.set({ series, xLabel, yLabel: this.axisLabel(a, axes.y), rowLabel: a.type === 'list' ? 'Position' : 'Row',
+                    emptyText: `No ${a.type === 'list' ? 'values' : 'rows'} with both ${xLabel} and ${this.axisLabel(a, axes.y)}` });
+    const points = series.reduce((sum, s) => sum + s.points.length, 0);
+    // a legend for two or more series; one series is named by the title
+    const legend = $('atlas-plot-legend');
+    legend.classList.toggle('d-none', series.length < 2);
+    legend.innerHTML = series.length < 2 ? '' : series.map((s, i) => `
+      <li data-series="${i}"><span class="atlas-plot-dot" style="background:${seriesColor(i, series.length)}"></span>
+        <a href="#${esc(this.cls.key)}/${esc(s.id)}">${esc(s.name)}</a>
+        <span class="text-muted">${s.points.length.toLocaleString()}</span></li>`).join('');
+    const parts = [view.compare ? `${series.length.toLocaleString()} object${series.length === 1 ? '' : 's'}` : '',
+                   `${points.toLocaleString()} point${points === 1 ? '' : 's'}`];
+    if (view.compare && view.total > series.length) {
+      parts.push(`the first ${series.length} of the ${view.total.toLocaleString()} in the table, as it is sorted`);
+    }
+    $('atlas-plot-meta').textContent = parts.filter(Boolean).join(' · ');
+    if (!$('atlas-plot-table').classList.contains('d-none')) this.renderPlotTable();
+  }
+
+  plotMode(mode) {
+    for (const button of document.querySelectorAll('[data-plot-view]')) {
+      const on = button.dataset.plotView === mode;
+      button.classList.toggle('active', on);
+      button.setAttribute('aria-pressed', String(on));
+    }
+    $('atlas-plot-stage').classList.toggle('d-none', mode !== 'plot');
+    $('atlas-plot-table').classList.toggle('d-none', mode !== 'table');
+    if (mode === 'table') this.renderPlotTable();
+  }
+
+  // The values as rows (a header first): one object's whole list or matrix, or, when
+  // comparing, a row per point (object, x, y). Copy takes these; the table shows them.
+  plotRows() {
+    const view = this.plotView;
+    const a = view.attr;
+    if (!view.compare) {
+      const value = view.objects[0].value || [];
+      if (a.type === 'list') return [['Position', a.label], ...value.map((v, i) => [String(i + 1), fmtNumber(v)])];
+      return [['Row', ...a.columns.map(c => c.label)], ...value.map((row, i) => [String(i + 1), ...row.map(fmtNumber)])];
+    }
+    const axes = this.plotAxesNow;
+    const rows = [[this.cls.label, this.axisLabel(a, axes.x), this.axisLabel(a, axes.y)]];
+    for (const o of view.objects) {
+      for (const [x, y] of seriesPoints(a.type, o.value, axes.x, axes.y)) rows.push([o._title, fmtNumber(x), fmtNumber(y)]);
+    }
+    return rows;
+  }
+
+  renderPlotTable() {
+    const rows = this.plotRows();
+    const [head, ...body] = rows;
+    const shown = body.slice(0, TABLE_ROWS);
+    $('atlas-plot-table').innerHTML = `
+      <table class="table table-sm atlas-plot-values">
+        <thead><tr>${head.map((h, i) => `<th class="${i ? 'num' : ''}">${esc(h)}</th>`).join('')}</tr></thead>
+        <tbody>${shown.map(row => `<tr>${row.map((v, i) => `<td class="${i ? 'num' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>
+      ${body.length > shown.length
+        ? `<p class="small text-muted mb-0">The first ${shown.length.toLocaleString()} of ${body.length.toLocaleString()} rows. Copy data takes them all.</p>` : ''}`;
+  }
+
+  // -- list and matrix fields in the form ----------------------------------------
+  seriesField(a, value, canEdit) {
+    const id = `f-${a.key}`;
+    const isList = a.type === 'list';
+    const columns = isList ? '' : (a.columns || []).map(c => esc(c.label)).join(' <span class="atlas-sep">⇥</span> ');
+    const hint = isList
+      ? 'A number per line. Paste a column from Excel, or separate them with semicolons.'
+      : 'A row per line, values separated by tabs: paste the cells straight from Excel.';
+    return this.fieldRow(a.label, `
+      <div class="atlas-series">
+        <textarea class="form-control form-control-sm atlas-series-text" id="${id}" rows="8" spellcheck="false" wrap="off"
+          data-series="${esc(a.key)}" ${canEdit ? '' : 'readonly'}
+          placeholder="${isList ? '210\n212,5\n208' : '0\t0\n0,1\t210\n0,2\t395'}">${esc(seriesText(a.type, value))}</textarea>
+        <div class="atlas-series-plot" data-series-plot></div>
+      </div>
+      <div class="form-text" data-series-status></div>
+      ${canEdit ? `<div class="form-text mt-0">${hint}</div>` : ''}`,
+      { id, required: a.required, sub: columns, attrs: `data-series-field="${esc(a.key)}"` });
+  }
+
+  bindSeriesFields() {
+    let timer;
+    $('atlas-object-form').addEventListener('input', e => {
+      const area = e.target.closest('[data-series]');
+      if (!area) return;
+      clearTimeout(timer);
+      timer = setTimeout(() => this.updateSeriesField(area.dataset.series), 150);
+    });
+  }
+
+  initSeriesFields() {
+    for (const a of this.seriesAttributes()) {
+      const box = $('atlas-object-form').querySelector(`[data-series-field="${CSS.escape(a.key)}"]`);
+      if (!box) continue;
+      this.formPlots[a.key] = new ScatterPlot(box.querySelector('[data-series-plot]'), { height: 212, compact: true });
+      this.updateSeriesField(a.key);
+    }
+  }
+
+  // Read a list or matrix field: its count or what is wrong, and its plot.
+  seriesValue(a) {
+    const area = $('atlas-object-form').querySelector(`[data-series="${CSS.escape(a.key)}"]`);
+    return parseSeries(a.type, area ? area.value : '', (a.columns || []).length);
+  }
+
+  updateSeriesField(key) {
+    const a = this.seriesAttributes().find(x => x.key === key);
+    const box = a && $('atlas-object-form').querySelector(`[data-series-field="${CSS.escape(key)}"]`);
+    if (!box) return;
+    const parsed = this.seriesValue(a);
+    const status = box.querySelector('[data-series-status]');
+    status.classList.toggle('text-danger', !!parsed.error);
+    status.textContent = parsed.error ? `${a.label} ${parsed.error}.` : parsed.count ? this.seriesCount(a, parsed.count) : '';
+    const plot = this.formPlots[key];
+    if (!plot) return;
+    const axes = a.type === 'matrix' && (a.columns || []).length > 1 ? { x: 0, y: 1 } : { x: -1, y: 0 };
+    plot.set({ series: [{ name: a.label, points: parsed.error ? [] : seriesPoints(a.type, parsed.value, axes.x, axes.y) }],
+               xLabel: this.axisLabel(a, axes.x), yLabel: this.axisLabel(a, axes.y),
+               rowLabel: a.type === 'list' ? 'Position' : 'Row',
+               emptyText: parsed.error ? 'Fix the values to see the plot' : 'The plot shows here' });
+  }
+
+  dropFormPlots() {
+    for (const plot of Object.values(this.formPlots)) plot.destroy();
+    this.formPlots = {};
+  }
+
+  // A user attribute's value (an id, or ids through a 'many' look-through) as names.
+  userText(value) {
+    if (value == null) return '';
+    return (Array.isArray(value) ? value : [value]).map(id => this.userNames[id] || `#${id}`).join(', ');
+  }
+
+  // A name with the username, where two people could share the name (filter lists).
+  userLabel(id) {
+    const u = this.users.find(x => String(x.id) === String(id));
+    if (!u) return `#${id}`;
+    return u.name === u.username ? u.name : `${u.name} (${u.username})`;
+  }
+
   linkText(value) {
     if (value == null) return '';
     return (Array.isArray(value) ? value : [value]).map(v => (v && typeof v === 'object' ? v._title : `#${v}`)).join(', ');
@@ -453,6 +773,7 @@ class AtlasBrowser {
     if (button.dataset.action === 'open') this.go(p.data._id);
     if (button.dataset.action === 'delete') this.remove(p.data._id);
     if (button.dataset.action === 'file') this.showFile(p.data, this.cls.attributes.find(a => a.key === button.dataset.attr));
+    if (button.dataset.action === 'series') this.showSeries(p.data, this.cls.attributes.find(a => a.key === button.dataset.attr));
     if (button.dataset.action === 'links') {
       const rel = this.cls.relationships.find(r => r.key === button.dataset.rel);
       if (rel) this.showLinks(rel, p.data[rel.key]);
@@ -576,7 +897,8 @@ class AtlasBrowser {
     return {
       getRows: async params => {
         const size = params.endRow - params.startRow;
-        const qs = new URLSearchParams({ page: Math.floor(params.startRow / size) + 1, page_size: size, expand: '*' });
+        const qs = new URLSearchParams({ page: Math.floor(params.startRow / size) + 1, page_size: size, expand: '*',
+                                         brief: 'true' });   // lists and matrices as counts
         if (this.incomingLinks().length) qs.set('incoming_counts', 'true');
         if (this.search) qs.set('q', this.search);
         const sort = params.sortModel.map(s => (s.sort === 'desc' ? '-' : '') + s.colId).join(',');
@@ -664,17 +986,26 @@ class AtlasBrowser {
       if (a.type === 'lookthrough') {
         if (!isNew) fields.push(this.computedField(a, obj[a.key]));
       } else if (FILE_TYPES.includes(a.type)) {
-        fields.push(`<div class="col-12" data-file-field="${esc(a.key)}"></div>`);
+        fields.push(`<div class="atlas-field" data-file-field="${esc(a.key)}"></div>`);
+      } else if (SERIES_TYPES.includes(a.type)) {
+        fields.push(this.seriesField(a, obj ? obj[a.key] : null, canEdit));
+      } else if (a.type === 'user') {
+        fields.push(this.userField(a));
       } else {
         fields.push(this.inputField(a, obj ? obj[a.key] : null, canEdit));
       }
     }
+    if (c.relationships.length) fields.push(this.formSection('Links'));
     for (const r of c.relationships) fields.push(this.linkField(r));
-    if (IS_ADMIN) fields.push(this.rolesField());
-    else if (obj && obj._roles.length) fields.push(this.rolesBadges(obj._roles));
+    if (IS_ADMIN) fields.push(this.formSection('Access'), this.rolesField());
+    else if (obj && obj._roles.length) fields.push(this.formSection('Access'), this.rolesBadges(obj._roles));
     $('atlas-object-form').innerHTML = fields.join('') || '<p class="text-muted mb-0">This class has no fields yet.</p>';
+    $('atlas-object-form').classList.toggle('atlas-readonly', !canEdit);   // values read as text, not greyed boxes
 
     for (const a of this.uploadAttributes()) this.renderFileField(a);
+    this.dropFormPlots();
+    this.initSeriesFields();
+    for (const a of this.userAttributes()) this.initUserSelect(a, obj ? obj[a.key] : null, canEdit);
     for (const r of c.relationships) this.initLinkSelect(r, obj ? obj[r.key] : null, canEdit);
     if (IS_ADMIN) this.initRolesSelect(obj ? obj._roles : [], canEdit);
 
@@ -689,60 +1020,109 @@ class AtlasBrowser {
     if (!isNew) history.replaceState(null, '', `#${c.key}/${obj._id}`);
   }
 
+  // One row of the form: the label on the left (with a note under it), the value on the right.
+  // sub and hint are HTML; attrs go on the row.
+  fieldRow(label, value, { id = '', required = false, sub = '', hint = '', attrs = '' } = {}) {
+    const mark = required ? ' <span class="text-danger">*</span>' : '';
+    const note = sub ? `<span class="atlas-field-sub">${sub}</span>` : '';
+    const name = id ? `<label class="atlas-field-label" for="${id}">${esc(label)}${mark}${note}</label>`
+      : `<span class="atlas-field-label">${esc(label)}${mark}${note}</span>`;
+    return `<div class="atlas-field" ${attrs}>${name}
+      <div class="atlas-field-value">${value}${hint ? `<div class="form-text">${hint}</div>` : ''}</div></div>`;
+  }
+
+  formSection(title) {
+    return `<div class="atlas-form-section">${esc(title)}</div>`;
+  }
+
   inputField(a, value, canEdit) {
     const id = `f-${a.key}`;
-    const required = a.required ? ' <span class="text-danger">*</span>' : '';
     const common = `id="${id}" data-key="${esc(a.key)}" data-type="${a.type}" ${canEdit ? '' : 'disabled'}`;
     let input;
-    let wide = false;
     switch (a.type) {
       case 'text':
-        wide = true;
-        input = `<textarea class="form-control" rows="3" ${common}>${esc(value)}</textarea>`;
+        input = `<textarea class="form-control form-control-sm" rows="3" ${common}>${esc(value)}</textarea>`;
         break;
       case 'int':
-        input = `<input type="number" step="1" class="form-control" value="${esc(value)}" ${common}>`;
+        input = `<input type="number" step="1" class="form-control form-control-sm" value="${esc(value)}" ${common}>`;
         break;
       case 'float':
-        input = `<input type="number" step="any" class="form-control" value="${esc(value)}" ${common}>`;
+        input = `<input type="number" step="any" class="form-control form-control-sm" value="${esc(value)}" ${common}>`;
         break;
       case 'date':
-        input = `<input type="date" class="form-control" value="${esc(value)}" ${common}>`;
+        input = `<input type="date" class="form-control form-control-sm" value="${esc(value)}" ${common}>`;
         break;
       case 'datetime':
-        input = `<input type="datetime-local" step="1" class="form-control" value="${esc(value)}" ${common}>`;
+        input = `<input type="datetime-local" step="1" class="form-control form-control-sm" value="${esc(value)}" ${common}>`;
         break;
       case 'boolean':
-        return `<div class="col-md-6"><div class="form-check form-switch mt-md-4 pt-md-2">
-          <input class="form-check-input" type="checkbox" ${common} ${value ? 'checked' : ''}>
-          <label class="form-check-label" for="${id}">${esc(a.label)}${required}</label></div></div>`;
+        input = `<div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" ${common} ${value ? 'checked' : ''}></div>`;
+        break;
       case 'choice': {
         const options = [...(a.options || [])];
         if (value != null && !options.includes(value)) options.push(value);   // keep an old value visible
-        input = `<select class="form-select" ${common}><option value="">—</option>${options.map(o =>
+        input = `<select class="form-select form-select-sm" ${common}><option value="">—</option>${options.map(o =>
           `<option value="${esc(o)}" ${o === value ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select>`;
         break;
       }
       default:
-        input = `<input type="text" class="form-control" value="${esc(value)}" ${common}>`;
+        input = `<input type="text" class="form-control form-control-sm" value="${esc(value)}" ${common}>`;
     }
-    return `<div class="${wide ? 'col-12' : 'col-md-6'}">
-      <label class="form-label" for="${id}">${esc(a.label)}${required}</label>${input}</div>`;
+    return this.fieldRow(a.label, input, { id, required: a.required });
   }
 
+  // A look-through: read from a linked object, so shown as text, with where it comes from.
   computedField(a, value) {
-    const text = fmtValue(a.value_type, value);
-    return `<div class="col-md-6"><span class="form-label d-block text-muted">${esc(a.label)}</span>
-      <div class="form-control-plaintext py-1">${text ? esc(text) : '<span class="text-muted">—</span>'}</div></div>`;
+    const text = a.value_type === 'user' ? this.userText(value) : fmtValue(a.value_type, value);
+    const rel = this.cls.relationships.find(r => r.key === String(a.lookup || '').split('.')[0]);
+    return this.fieldRow(a.label,
+      `<div class="atlas-field-text">${text ? esc(text) : '<span class="text-muted">—</span>'}</div>`,
+      { sub: rel ? `from ${esc(rel.label)}` : '' });
+  }
+
+  userAttributes() {
+    return this.cls.attributes.filter(a => a.type === 'user');
+  }
+
+  userField(a) {
+    return this.fieldRow(a.label, `<select id="f-${a.key}" class="form-control-sm" placeholder="Choose a person…"></select>`,
+                         { id: `f-${a.key}`, required: a.required });
+  }
+
+  // People with an active account, plus whoever the field names now (they may have left).
+  initUserSelect(a, value, canEdit) {
+    const options = this.users.filter(u => u.active || u.id === value)
+      .map(u => ({ value: String(u.id), name: u.name, username: u.username, active: u.active }));
+    if (value != null && !(value in this.userNames)) {
+      options.push({ value: String(value), name: `#${value}`, username: '', active: false });
+    }
+    const inactive = d => (d.active ? '' : '<span class="text-muted small ms-2">inactive</span>');
+    const select = new TomSelect(`#f-${a.key}`, {
+      options,
+      items: value == null ? [] : [String(value)],
+      valueField: 'value',
+      labelField: 'name',
+      searchField: ['name', 'username'],
+      maxItems: 1,
+      maxOptions: null,
+      plugins: ['clear_button'],
+      dropdownParent: 'body',
+      render: {
+        option: (d, escape) => `<div>${escape(d.name)} <span class="text-muted small">${escape(d.username)}</span>${inactive(d)}</div>`,
+        item: (d, escape) => `<div>${escape(d.name)}${inactive(d)}</div>`,
+        no_results: () => '<div class="no-results">No matches</div>',
+      },
+    });
+    if (!canEdit) select.disable();
+    this.selects[a.key] = select;
   }
 
   linkField(r) {
-    const required = r.required ? ' <span class="text-danger">*</span>' : '';
-    return `<div class="col-12">
-      <label class="form-label" for="f-${r.key}">${esc(r.label)}${required}
-        <span class="text-muted small ms-1">${esc(r.target_label)}</span></label>
-      <select id="f-${r.key}" ${r.cardinality === 'many' ? 'multiple' : ''} placeholder="Search ${esc(r.target_label)}…"></select>
-    </div>`;
+    return this.fieldRow(r.label,
+      `<select id="f-${r.key}" class="form-control-sm" ${r.cardinality === 'many' ? 'multiple' : ''}
+               placeholder="Search ${esc(r.target_label)}…"></select>`,
+      { id: `f-${r.key}`, required: r.required, sub: esc(r.target_label) });
   }
 
   initLinkSelect(r, value, canEdit) {
@@ -780,11 +1160,9 @@ class AtlasBrowser {
     const help = classRoles.length
       ? `${classRoles.join(', ')} can always work with ${this.cls.label}. Roles chosen here get access to this object as well.`
       : 'No roles: everyone can work with this object. With roles: only those roles, as their permissions allow.';
-    return `<div class="col-12">
-      <label class="form-label" for="f-_roles">Roles</label>
-      <select id="f-_roles" multiple placeholder="${classRoles.length ? 'No extra roles' : 'Everyone'}"></select>
-      <div class="form-text">${esc(help)}</div>
-    </div>`;
+    return this.fieldRow('Roles',
+      `<select id="f-_roles" class="form-control-sm" multiple placeholder="${classRoles.length ? 'No extra roles' : 'Everyone'}"></select>`,
+      { id: 'f-_roles', hint: esc(help) });
   }
 
   initRolesSelect(values, canEdit) {
@@ -794,31 +1172,29 @@ class AtlasBrowser {
       plugins: ['remove_button'],
       dropdownParent: 'body',
       maxOptions: null,
+      hidePlaceholder: true,    // "Everyone" / "No extra roles" only while no role is picked
     });
     if (!canEdit) select.disable();
     this.selects._roles = select;
   }
 
   rolesBadges(roles) {
-    return `<div class="col-12"><span class="form-label d-block text-muted">Roles</span>
-      ${roles.map(id => `<span class="badge text-bg-light border me-1">${esc(this.roleNames[id] || `#${id}`)}</span>`).join('')}
-    </div>`;
+    return this.fieldRow('Roles', `<div class="atlas-field-text">${roles.map(id =>
+      `<span class="badge text-bg-light border me-1">${esc(this.roleNames[id] || `#${id}`)}</span>`).join('')}</div>`);
   }
 
   incomingHtml(groups) {
     if (!groups.length) return '';
     this.incomingGroups = groups;
-    return '<hr><div class="small text-muted mb-2">Linked from</div>' + groups.map((g, n) => {
+    return this.formSection('Linked from') + groups.map((g, n) => {
       const count = g.count ?? g.items.length;
-      return `
-      <div class="atlas-incoming-group mb-2 small" data-group="${n}">
-        <span class="me-1">${esc(g.label)}</span><span class="text-muted me-2">${count.toLocaleString()}</span>
-        <span class="atlas-incoming-items">${g.items.map(i =>
-          `<a class="badge text-bg-light border text-decoration-none me-1" href="#${esc(g.class)}/${i._id}">${esc(i._title)}</a>`
-        ).join('')}${count > g.items.length
-          ? `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-show-all="${n}">Show all ${count.toLocaleString()}</button>`
-          : ''}</span>
-      </div>`;
+      const items = `<span class="atlas-incoming-items">${g.items.map(i =>
+        `<a class="badge text-bg-light border text-decoration-none me-1" href="#${esc(g.class)}/${i._id}">${esc(i._title)}</a>`
+      ).join('')}${count > g.items.length
+        ? `<button type="button" class="btn btn-link btn-sm p-0 align-baseline" data-show-all="${n}">Show all ${count.toLocaleString()}</button>`
+        : ''}</span>`;
+      return this.fieldRow(g.label, `<div class="atlas-field-text">${items}</div>`, {
+        sub: `${count.toLocaleString()} ${count === 1 ? 'object' : 'objects'}`, attrs: `data-group="${n}"` });
     }).join('');
   }
 
@@ -983,20 +1359,29 @@ class AtlasBrowser {
     const kinds = isImage ? 'PNG, JPEG, GIF, WebP, TIFF or BMP' : 'PDF, Word, Excel, PowerPoint, OpenDocument or CSV';
     const required = a.required ? ' <span class="text-danger">*</span>' : '';
     box.innerHTML = `
-      <span class="form-label d-block">${esc(a.label)}${required}</span>
-      <div class="atlas-drop" data-drop="${esc(a.key)}" tabindex="${this.canEdit ? 0 : -1}">
-        <div class="atlas-drop-preview">${preview}</div>
-        <div class="atlas-drop-info">${info}</div>
-        <div class="atlas-drop-actions">${actions}</div>
-        <input type="file" class="d-none" accept="${esc(ACCEPT[a.type])}">
-      </div>
-      ${this.canEdit ? `<div class="form-text">${kinds}, up to ${MAX_FILE_MB} MB. Drop a file here${isImage ? ' or paste one with Ctrl+V' : ''}.</div>` : ''}`;
+      <span class="atlas-field-label">${esc(a.label)}${required}</span>
+      <div class="atlas-field-value">
+        <div class="atlas-drop" data-drop="${esc(a.key)}" tabindex="${this.canEdit ? 0 : -1}">
+          <div class="atlas-drop-preview">${preview}</div>
+          <div class="atlas-drop-info">${info}</div>
+          <div class="atlas-drop-actions">${actions}</div>
+          <input type="file" class="d-none" accept="${esc(ACCEPT[a.type])}">
+        </div>
+        ${this.canEdit ? `<div class="form-text">${kinds}, up to ${MAX_FILE_MB} MB. Drop a file here${isImage ? ' or paste one with Ctrl+V' : ''}.</div>` : ''}
+      </div>`;
   }
 
   collect() {
     const out = {};
     for (const el of $('atlas-object-form').querySelectorAll('[data-type]')) {
       out[el.dataset.key] = el.dataset.type === 'boolean' ? el.checked : (el.value === '' ? null : el.value);
+    }
+    for (const a of this.seriesAttributes()) {
+      if (this.formPlots[a.key]) out[a.key] = this.seriesValue(a).value;
+    }
+    for (const a of this.userAttributes()) {
+      const select = this.selects[a.key];
+      if (select) out[a.key] = select.getValue() ? Number(select.getValue()) : null;
     }
     for (const r of this.cls.relationships) {
       const select = this.selects[r.key];
@@ -1023,6 +1408,13 @@ class AtlasBrowser {
     if (missing.length) {
       this.showError(`Required: ${missing.map(a => a.label).join(', ')}.`);
       return;
+    }
+    for (const a of this.seriesAttributes()) {
+      const parsed = this.formPlots[a.key] ? this.seriesValue(a) : {};
+      if (parsed.error) {
+        this.showError(`${a.label} ${parsed.error}.`);
+        return;
+      }
     }
     $('atlas-object-save').disabled = true;
     const wasNew = !this.editing;

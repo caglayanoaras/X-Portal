@@ -5,6 +5,7 @@ and scripts follow the same rules. Sign in as for the rest of the portal: the
 session cookie, or `Authorization: Bearer <token>` from POST /auth/token.
 
     GET    /atlas/api/roles                              portal roles (for role pickers)
+    GET    /atlas/api/users                              portal users (for user attributes)
     GET    /atlas/api/classes                            classes you can see
     POST   /atlas/api/classes                            create a class          (admins)
     GET    /atlas/api/classes/{class}                    its definition
@@ -12,6 +13,8 @@ session cookie, or `Authorization: Bearer <token>` from POST /auth/token.
     DELETE /atlas/api/classes/{class}[?force=true]       delete it               (admins)
     GET    /atlas/api/classes/{class}/objects            list, filter, search, sort, page
     GET    /atlas/api/classes/{class}/objects.xlsx       the same objects as an Excel file (.csv: CSV)
+    POST   /atlas/api/classes/{class}/import             check an Excel or CSV file, or import it (admins)
+    GET    /atlas/api/classes/{class}/import/template.xlsx   an empty sheet to fill in, with help (admins)
     POST   /atlas/api/classes/{class}/objects            create an object
     GET    /atlas/api/classes/{class}/objects/{id}       one object
     PATCH  /atlas/api/classes/{class}/objects/{id}       change some fields
@@ -23,6 +26,7 @@ session cookie, or `Authorization: Bearer <token>` from POST /auth/token.
 Admins are Data Admins and Superadmins. The rules for everyone else are in
 app/atlas/permissions.py.
 """
+import json
 import os
 from typing import Annotated
 
@@ -32,13 +36,14 @@ from fastapi.templating import Jinja2Templates
 from sqlmodel import Session, select
 
 from app.atlas import db as atlas_db
-from app.atlas import export, files
+from app.atlas import export, files, importer
 from app.atlas.errors import AtlasError
 from app.atlas.objects import (PAGE_SIZE, PAGE_SIZE_MAX, class_visible, create_object, delete_object,
                                get_file, get_object, list_objects, set_file, update_object, upload_attribute)
 from app.atlas.permissions import can_create, is_atlas_admin, viewer_for
 from app.atlas.schema import (RESERVED_KEYS, class_to_api, create_class, delete_class, load_schema,
                               parse_definition, update_class)
+from app.atlas.users import Users
 from app.core.config import settings
 from app.core.database import get_session
 from app.core.utils import flash, get_flashed_messages, redirect_to_route
@@ -90,6 +95,16 @@ def _portal_role_ids(db: Session) -> set:
     return set(db.exec(select(UserRole.id)).all())
 
 
+def _portal_role_names(db: Session) -> dict:
+    return {r.id: r.rolename for r in db.exec(select(UserRole)).all()}
+
+
+def _require_import_admin(user: User) -> None:
+    """Imports are for Data Admins and Superadmins; everyone else adds objects in the form."""
+    if not is_atlas_admin(user):
+        raise AtlasError(403, "Only Data Admins and Superadmins can import.")
+
+
 def _check_class_roles(roles: list, db: Session) -> None:
     known = _portal_role_ids(db) if roles else set()
     unknown = [role_id for role_id in roles if role_id not in known]
@@ -136,6 +151,13 @@ def api_roles(current_user: ActiveUserDep, db: SessionDep):
     return [{"id": r.id, "rolename": r.rolename, "can_create": r.can_create, "can_read": r.can_read,
              "can_update": r.can_update, "can_delete": r.can_delete}
             for r in db.exec(select(UserRole).order_by(UserRole.rolename)).all()]
+
+
+@atlas_router.get("/api/users", name="atlas_api_users")
+def api_users(current_user: ActiveUserDep):
+    """Portal users, for user attributes (which hold their ids): id, username, name
+    ("Ayşe Yılmaz") and whether the account is active, ordered by name."""
+    return Users.load().items()
 
 
 @atlas_router.get("/api/classes", name="atlas_api_classes")
@@ -217,19 +239,22 @@ def api_objects(
     fields: str | None = Query(None, description="Only these fields (comma list); _id is always included."),
     incoming_counts: bool = Query(False, description="Add _incoming_counts: per 'class.relationship' that "
                                                      "points here, how many objects you can read link to each one."),
+    brief: bool = Query(False, description="Lists and matrices as {\"count\": n} instead of their values."),
 ):
     """List objects. Any other query parameter is a filter: `field=value` or
     `field__op=value` with op in eq, ne, gt, gte, lt, lte, contains, startswith,
     in (comma list), isnull (true/false), on (a date). Examples:
     `result=fail`, `qty__gte=5`, `retests=9`, `_created_at__gte=2026-11-01`.
-    The objects linking to object 9 through batches.retests: GET /classes/batches/objects?retests=9."""
+    The objects linking to object 9 through batches.retests: GET /classes/batches/objects?retests=9.
+    Lists and matrices filter with isnull only and sort by how many entries they have."""
     viewer = viewer_for(current_user)
     filters = [(k, v) for k, v in request.query_params.multi_items() if k not in RESERVED_KEYS]
     with atlas_db.connect() as conn:
         schema = load_schema(conn)
         cls = schema.get(class_key)
         return list_objects(conn, schema, cls, viewer, filters, text=q, sort=sort, page=page,
-                            page_size=page_size, expand=expand, fields=fields, incoming_counts=incoming_counts)
+                            page_size=page_size, expand=expand, fields=fields, incoming_counts=incoming_counts,
+                            brief=brief)
 
 
 @atlas_router.get("/api/classes/{class_key}/objects.{fmt}", name="atlas_api_export")
@@ -251,13 +276,73 @@ def api_export(
     are written as "title (#id)". At most 100,000 objects per export."""
     viewer = viewer_for(current_user)
     filters = [(k, v) for k, v in request.query_params.multi_items() if k not in RESERVED_KEYS and k != "_tz"]
-    role_names = {r.id: r.rolename for r in db.exec(select(UserRole)).all()}
+    role_names = _portal_role_names(db)
     with atlas_db.connect() as conn:
         schema = load_schema(conn)
         body, media, name = export.build(conn, schema, schema.get(class_key), viewer, filters, fmt=fmt, text=q,
                                          sort=sort, fields=fields, incoming_counts=incoming_counts, tz=tz,
                                          role_names=role_names)
     return Response(content=body, media_type=media, headers={
+        "Content-Disposition": files.content_disposition(name, inline=False), "Cache-Control": "no-store"})
+
+
+@atlas_router.post("/api/classes/{class_key}/import", name="atlas_api_import")
+def api_import(
+    class_key: str,
+    current_user: ActiveUserDep,
+    db: SessionDep,
+    file: UploadFile = File(..., description="An Excel workbook (.xlsx, .xlsm) or a CSV file (field 'file')."),
+    sheet: str | None = Form(None, description="The sheet to read; the first one with a column Atlas knows."),
+    mapping: str | None = Form(None, description="JSON list, one per column: the field it goes into "
+                                                 "(an attribute or relationship key, _id, _version, or _roles "
+                                                 "for admins; '' skips it). "
+                                                 "Left out: columns are matched by label or key."),
+    match: str | None = Form(None, description="A unique attribute: rows without an ID change the object "
+                                               "that holds the same value, when there is one."),
+    dry_run: bool = Form(True, description="Check only (the default). false imports, if no row has a problem."),
+):
+    """Check a sheet against the class, or import it (Data Admins and Superadmins only).
+    Rows with an ID change that object, rows without one create objects. Every row is
+    checked as the API checks it; an import goes in whole or not at all. Links and
+    roles are written by title or name (or #id), separated by semicolons. The answer
+    lists the columns (and the field each one goes into), the counts (created,
+    updated, unchanged, failed) and the problems, each with the rows that have it."""
+    _require_import_admin(current_user)
+    limit = settings.ATLAS_MAX_FILE_MB * 1024 * 1024
+    data = file.file.read(limit + 1)
+    if len(data) > limit:
+        raise AtlasError(413, f"'{files.clean_name(file.filename)}' is larger than {settings.ATLAS_MAX_FILE_MB} MB.")
+    try:
+        columns = json.loads(mapping) if mapping else None
+    except ValueError:
+        raise AtlasError(400, "mapping must be a JSON list of field keys.") from None
+    viewer = viewer_for(current_user)
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        cls = schema.get(class_key)
+        if not class_visible(conn, viewer, cls):
+            raise AtlasError(404, f"There is no class '{class_key}'.")
+        return importer.run(conn, schema, cls, viewer, files.clean_name(file.filename), data, sheet=sheet or None,
+                            mapping=columns, match=match or None, dry_run=dry_run,
+                            role_names=_portal_role_names(db))
+
+
+@atlas_router.get("/api/classes/{class_key}/import/template.xlsx", name="atlas_api_import_template")
+def api_import_template(class_key: str, current_user: ActiveUserDep, db: SessionDep):
+    """An Excel file to add objects with (Data Admins and Superadmins only): a first sheet
+    saying step by step how to fill it in, with what goes in each column and an example
+    from Atlas, and the sheet to fill in, whose columns keep what is typed (choices as
+    drop-downs, a note on each cell)."""
+    _require_import_admin(current_user)
+    viewer = viewer_for(current_user)
+    with atlas_db.connect() as conn:
+        schema = load_schema(conn)
+        cls = schema.get(class_key)
+        if not class_visible(conn, viewer, cls):
+            raise AtlasError(404, f"There is no class '{class_key}'.")
+        body, name = importer.template(conn, schema, cls, viewer, role_names=_portal_role_names(db),
+                                       username=current_user.username, max_mb=settings.ATLAS_MAX_FILE_MB)
+    return Response(content=body, media_type=export.FORMATS["xlsx"], headers={
         "Content-Disposition": files.content_disposition(name, inline=False), "Cache-Control": "no-store"})
 
 

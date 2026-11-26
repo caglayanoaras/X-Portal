@@ -15,6 +15,7 @@ from app.core.exceptions import (
 from app.crud.users_and_permissions import *
 from app.models import *
 from app.atlas.objects import purge_role as atlas_purge_role
+from app.atlas.users import user_references as atlas_user_references
 from app.dependencies.auth import (
     get_current_active_user, get_current_superadmin
 )
@@ -197,7 +198,15 @@ def update_existing_user(current_user: UserDep, username: str, user_update: User
 
 @users_and_permissions_router.delete("/users/{username}", name='delete_user_by_username', status_code=status.HTTP_204_NO_CONTENT)
 def delete_user_by_username(current_user: UserDep, username: str, db: SessionDep):
-    """Delete a user by its username."""
+    """Delete a user by its username. Refused while Atlas names the user (the Technician
+    of a test result, say): deactivate the account instead, and Atlas keeps the name."""
+    existing = read_user(db, username)
+    named = atlas_user_references(existing.id) if existing is not None else []
+    if named:
+        where = "; ".join(f"{cls} › {attr} ({n} object{'s' if n > 1 else ''})" for cls, attr, n in named)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Atlas names {username} in {where}. Deactivate the account instead, "
+                                   f"or clear those fields first.")
     try:
         delete_user(db=db, username=username)
         return None
